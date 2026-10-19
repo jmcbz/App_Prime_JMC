@@ -10,7 +10,7 @@ import * as db from './database/index.js';
 
 authenticator.options = { window: 1 };
 
-const MFA_ISSUER = process.env.MFA_TOTP_ISSUER || 'PRIsME Prime BZ';
+const MFA_ISSUER = process.env.MFA_TOTP_ISSUER || 'PRIsME Prime';
 const MFA_TOKEN_EXPIRES = '5m';
 const MFA_MAX_ATTEMPTS = 5;
 const MFA_ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
