@@ -26,7 +26,15 @@ export async function initDb() {
     await createSchemaPg(pool);
     console.log('✅ Base de données PostgreSQL initialisée');
   } else {
-    const BetterSqlite3 = (await import('better-sqlite3')).default;
+    let BetterSqlite3;
+    try {
+      BetterSqlite3 = (await import('better-sqlite3')).default;
+    } catch (err) {
+      throw new Error(
+        'Aucune base de données configurée : définissez DATABASE_URL (PostgreSQL) en production. ' +
+          'Le mode SQLite local nécessite le module optionnel better-sqlite3. Détail : ' + err.message
+      );
+    }
     const dbPath = process.env.SQLITE_PATH || path.join(__dirname, '..', 'data', 'app-prime.db');
     const fs = await import('fs');
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });

@@ -1,0 +1,6 @@
+# Nixpacks — PRIsME Prime
+# Node 22 (aligné Vite 7 / engines). Le frontend (racine) build vers dist/,
+# que le serveur Express (server/index.js) sert en production avec l'API.
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+NODE_ENV = "production"
