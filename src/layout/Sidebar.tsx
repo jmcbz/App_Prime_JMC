@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, Building2, BookOpen, ListChecks, Shield } from 'lucide-react';
+import { LayoutDashboard, Users, Building2, BookOpen, ListChecks, ShieldCheck, LogOut } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const NAV = [
   { to: '/', label: 'Tour de contrôle', icon: LayoutDashboard, end: true },
@@ -10,6 +11,8 @@ const NAV = [
 ];
 
 export default function Sidebar() {
+  const { user, logout } = useAuth();
+
   return (
     <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-white/10 bg-bz-dark">
       <div className="flex items-center gap-3 border-b border-white/10 px-6 py-5">
@@ -30,9 +33,7 @@ export default function Sidebar() {
             end={end}
             className={({ isActive }) =>
               `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
-                isActive
-                  ? 'bg-bz-blue/15 text-white shadow-titan'
-                  : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                isActive ? 'bg-bz-blue/15 text-white shadow-titan' : 'text-slate-400 hover:bg-white/5 hover:text-white'
               }`
             }
           >
@@ -40,13 +41,41 @@ export default function Sidebar() {
             {label}
           </NavLink>
         ))}
+
+        {user?.role === 'admin' && (
+          <>
+            <div className="px-3 pb-1 pt-4 text-[10px] font-bold uppercase tracking-wider text-slate-600">Administration</div>
+            <NavLink
+              to="/administration"
+              className={({ isActive }) =>
+                `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
+                  isActive ? 'bg-bz-blue/15 text-white shadow-titan' : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                }`
+              }
+            >
+              <ShieldCheck className="h-[18px] w-[18px]" />
+              Administration
+            </NavLink>
+          </>
+        )}
       </nav>
 
-      <div className="border-t border-white/10 px-5 py-4">
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <Shield className="h-4 w-4 text-bz-emerald" />
-          <span>Accès BZ interne</span>
-        </div>
+      <div className="border-t border-white/10 px-4 py-4">
+        {user && (
+          <div className="mb-3">
+            <div className="truncate text-sm font-medium text-white">{user.prenom} {user.nom}</div>
+            <div className="truncate text-[11px] text-slate-500">{user.email}</div>
+            <span className="mt-1 inline-flex items-center rounded-full border border-titan-cyan/30 bg-titan-cyan/10 px-2 py-0.5 text-[10px] font-medium text-titan-cyan">
+              {user.role === 'admin' ? 'Administrateur' : 'Prime'}
+            </span>
+          </div>
+        )}
+        <button
+          onClick={logout}
+          className="flex w-full items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:text-white"
+        >
+          <LogOut className="h-4 w-4" /> Se déconnecter
+        </button>
       </div>
     </aside>
   );

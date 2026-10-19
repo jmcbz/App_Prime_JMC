@@ -11,25 +11,42 @@ Conçue comme une **trousse d'outils** : procédures prêtes à l'emploi et suiv
 - **Trousse d'outils** — procédures par catégorie (Onboarding, Incident, Maintenance, Sécurité, Reporting) avec étapes dépliables.
 - **Suivis** — tableau d'opérations (à faire / en cours / bloqué / terminé) par client.
 
+## Administration & sécurité
+
+- **Authentification** : courriel + mot de passe (bcrypt), session JWT en cookie httpOnly.
+- **MFA TOTP obligatoire pour tous** : configuration (QR code) à la première connexion, puis vérification à chaque login. Pattern éprouvé de la flotte PRIsME (otplib + secret chiffré AES-256-GCM).
+- **2 rôles** : `admin` (gère tout) et `prime` (usager standard).
+- **Section Administration** (admin only) : créer des usagers, changer de rôle, activer/désactiver, réinitialiser le MFA. Protection du dernier administrateur.
+
 ## Stack
 
-React 18 · Vite 5 · TypeScript · Tailwind CSS · React Router · lucide-react.
-Même socle technique que la flotte PRIsME. Données actuellement **mockées** (`src/data/mock.ts`) — backend Express + PostgreSQL à brancher ensuite.
+- **Frontend** : React 18 · Vite 5 · TypeScript · Tailwind CSS · React Router · lucide-react.
+- **Backend** (`server/`) : Express · otplib (TOTP) · bcryptjs · jsonwebtoken · qrcode. Base **SQLite en dev** (better-sqlite3) / **PostgreSQL en prod** (via `DATABASE_URL`) — même philosophie que la flotte PRIsME.
+- Données métier (Primes / clients / suivis / procédures) encore **mockées** (`src/data/mock.ts`).
 
 ## Démarrer
 
 ```bash
+# 1) Backend (API + auth + MFA)
+cd server
 npm install
-npm run dev      # http://127.0.0.1:5190
-npm run build    # tsc -b && vite build
+cp .env.example .env     # définir au minimum JWT_SECRET
+npm start                # http://127.0.0.1:4100  (crée l'admin initial au 1er boot)
+
+# 2) Frontend (dans un autre terminal, à la racine)
+npm install
+npm run dev              # http://127.0.0.1:5190  (proxy /api -> 4100)
+npm run build            # tsc -b && vite build
 ```
+
+Au premier démarrage du backend, un **administrateur initial** est créé (`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) — mot de passe à changer.
 
 ## Prochaines étapes
 
-- Backend Express + PostgreSQL (persistance Primes / clients / procédures / suivis).
-- Authentification BZ interne + MFA (pattern PRIsME).
-- Édition des procédures et des suivis (CRUD).
+- Persister les données métier (Primes / clients / procédures / suivis) en base.
+- Procédures éditables (CRUD) — **à venir**.
 - Radar de maturité par technicien (façon PRIsME 6 piliers).
+- Changement de mot de passe en self-service.
 
 ---
 

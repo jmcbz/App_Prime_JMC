@@ -1,0 +1,24 @@
+{
+  "name": "app-prime-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend PRIsME Prime — authentification, MFA TOTP, gestion des usagers.",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.1",
+    "jsonwebtoken": "^9.0.2",
+    "otplib": "^12.0.1",
+    "pg": "^8.13.1",
+    "qrcode": "^1.5.4"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.6.2"
+  }
+}

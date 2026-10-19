@@ -5,3 +5,16 @@ dist-ssr
 .DS_Store
 *.log
 .vite
+
+# Artefacts de compilation TS
+*.tsbuildinfo
+vite.config.js
+
+# Backend
+server/node_modules
+server/data
+data
+*.db
+*.db-shm
+*.db-wal
+.env
