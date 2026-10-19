@@ -70,30 +70,24 @@ function createSchemaSqlite(sqlite) {
     );
     CREATE TABLE IF NOT EXISTS primes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nom TEXT NOT NULL,
-      code_titan TEXT NOT NULL DEFAULT '',
-      specialites TEXT NOT NULL DEFAULT '[]',
-      disponibilite TEXT NOT NULL DEFAULT 'disponible',
-      avatar_initiales TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      data TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS clients (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nom TEXT NOT NULL,
-      secteur TEXT NOT NULL DEFAULT '',
       prime_id INTEGER REFERENCES primes(id) ON DELETE SET NULL,
-      statut TEXT NOT NULL DEFAULT 'actif',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      data TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS suivis (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      titre TEXT NOT NULL,
       client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE,
       prime_id INTEGER REFERENCES primes(id) ON DELETE SET NULL,
-      statut TEXT NOT NULL DEFAULT 'a_faire',
-      echeance TEXT,
-      note TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      data TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
@@ -123,30 +117,24 @@ async function createSchemaPg(pool) {
     );
     CREATE TABLE IF NOT EXISTS primes (
       id SERIAL PRIMARY KEY,
-      nom TEXT NOT NULL,
-      code_titan TEXT NOT NULL DEFAULT '',
-      specialites JSONB NOT NULL DEFAULT '[]',
-      disponibilite TEXT NOT NULL DEFAULT 'disponible',
-      avatar_initiales TEXT NOT NULL DEFAULT '',
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS clients (
       id SERIAL PRIMARY KEY,
-      nom TEXT NOT NULL,
-      secteur TEXT NOT NULL DEFAULT '',
       prime_id INTEGER REFERENCES primes(id) ON DELETE SET NULL,
-      statut TEXT NOT NULL DEFAULT 'actif',
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS suivis (
       id SERIAL PRIMARY KEY,
-      titre TEXT NOT NULL,
       client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE,
       prime_id INTEGER REFERENCES primes(id) ON DELETE SET NULL,
-      statut TEXT NOT NULL DEFAULT 'a_faire',
-      echeance TEXT,
-      note TEXT,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
@@ -322,189 +310,179 @@ export async function resetMfa(userId) {
   }
 }
 
-// ---------- Métier : Primes ----------
+// ---------- Métier : stockage JSON (pattern PRIsME BZ — colonne `data`) ----------
+// Les entités stockent leur contenu dans une colonne `data` (JSONB en PG, TEXT JSON en SQLite).
+// Les clés relationnelles (prime_id, client_id) sont AUSSI en colonnes réelles pour les jointures/cascades.
 
-function parseSpecialites(value) {
-  if (Array.isArray(value)) return value;
-  if (!value) return [];
-  try { return JSON.parse(value); } catch { return []; }
+function parseData(value) {
+  if (value && typeof value === 'object') return value; // PG JSONB déjà objet
+  if (!value) return {};
+  try { return JSON.parse(value); } catch { return {}; }
 }
+
+/** Insère une ligne {data, <fk>} et relit (SQLite/PG). */
+async function insertJsonRow(table, data, fks = {}) {
+  const json = JSON.stringify(data || {});
+  const fkCols = Object.keys(fks);
+  if (driver.kind === 'pg') {
+    const cols = [...fkCols, 'data'];
+    const ph = cols.map((c, i) => (c === 'data' ? `$${i + 1}::jsonb` : `$${i + 1}`));
+    const r = await driver.pool.query(
+      `INSERT INTO ${table} (${cols.join(',')}) VALUES (${ph.join(',')}) RETURNING *`,
+      [...fkCols.map((c) => fks[c]), json]
+    );
+    return r.rows[0];
+  }
+  const cols = [...fkCols, 'data'];
+  const info = driver.sqlite.prepare(
+    `INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`
+  ).run(...fkCols.map((c) => fks[c]), json);
+  return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid);
+}
+
+/** Met à jour data + fks et relit. */
+async function updateJsonRow(table, id, data, fks = {}) {
+  const json = JSON.stringify(data || {});
+  const fkCols = Object.keys(fks);
+  if (driver.kind === 'pg') {
+    const sets = ['data = $1::jsonb', 'updated_at = CURRENT_TIMESTAMP',
+      ...fkCols.map((c, i) => `${c} = $${i + 2}`)];
+    const r = await driver.pool.query(
+      `UPDATE ${table} SET ${sets.join(', ')} WHERE id = $${fkCols.length + 2} RETURNING *`,
+      [json, ...fkCols.map((c) => fks[c]), id]
+    );
+    return r.rows[0] || null;
+  }
+  const sets = ["data = ?", "updated_at = datetime('now')", ...fkCols.map((c) => `${c} = ?`)];
+  driver.sqlite.prepare(`UPDATE ${table} SET ${sets.join(', ')} WHERE id = ?`)
+    .run(json, ...fkCols.map((c) => fks[c]), id);
+  return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) || null;
+}
+
+async function deleteRow(table, id) {
+  if (driver.kind === 'pg') await driver.pool.query(`DELETE FROM ${table} WHERE id = $1`, [id]);
+  else driver.sqlite.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+}
+
+async function selectAll(table, orderBy) {
+  if (driver.kind === 'pg') return (await driver.pool.query(`SELECT * FROM ${table} ORDER BY ${orderBy}`)).rows;
+  return driver.sqlite.prepare(`SELECT * FROM ${table} ORDER BY ${orderBy}`).all();
+}
+
+// ---------- Primes ----------
 
 function normalizePrime(row) {
   if (!row) return null;
+  const d = parseData(row.data);
   return {
     id: row.id,
-    nom: row.nom,
-    codeTitan: row.code_titan || '',
-    specialites: parseSpecialites(row.specialites),
-    disponibilite: row.disponibilite || 'disponible',
-    avatarInitiales: row.avatar_initiales || '',
+    nom: d.nom || '',
+    codeTitan: d.codeTitan || '',
+    specialites: Array.isArray(d.specialites) ? d.specialites : [],
+    disponibilite: d.disponibilite || 'disponible',
+    avatarInitiales: d.avatarInitiales || '',
+  };
+}
+
+function primeData({ nom, codeTitan, specialites, disponibilite, avatarInitiales }) {
+  return {
+    nom: nom || '',
+    codeTitan: codeTitan || '',
+    specialites: Array.isArray(specialites) ? specialites : [],
+    disponibilite: disponibilite || 'disponible',
+    avatarInitiales: avatarInitiales || '',
   };
 }
 
 export async function listPrimes() {
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query('SELECT * FROM primes ORDER BY nom ASC');
-    return r.rows.map(normalizePrime);
-  }
-  return driver.sqlite.prepare('SELECT * FROM primes ORDER BY nom ASC').all().map(normalizePrime);
+  return (await selectAll('primes', 'id ASC')).map(normalizePrime);
 }
 
-export async function createPrime({ nom, codeTitan, specialites, disponibilite, avatarInitiales }) {
-  const spec = JSON.stringify(Array.isArray(specialites) ? specialites : []);
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query(
-      `INSERT INTO primes (nom, code_titan, specialites, disponibilite, avatar_initiales)
-       VALUES ($1,$2,$3::jsonb,$4,$5) RETURNING *`,
-      [nom, codeTitan || '', spec, disponibilite || 'disponible', avatarInitiales || '']
-    );
-    return normalizePrime(r.rows[0]);
-  }
-  const info = driver.sqlite.prepare(
-    `INSERT INTO primes (nom, code_titan, specialites, disponibilite, avatar_initiales) VALUES (?,?,?,?,?)`
-  ).run(nom, codeTitan || '', spec, disponibilite || 'disponible', avatarInitiales || '');
-  return normalizePrime(driver.sqlite.prepare('SELECT * FROM primes WHERE id = ?').get(info.lastInsertRowid));
+export async function createPrime(input) {
+  return normalizePrime(await insertJsonRow('primes', primeData(input)));
 }
 
-export async function updatePrime(id, { nom, codeTitan, specialites, disponibilite, avatarInitiales }) {
-  const spec = JSON.stringify(Array.isArray(specialites) ? specialites : []);
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query(
-      `UPDATE primes SET nom=$1, code_titan=$2, specialites=$3::jsonb, disponibilite=$4, avatar_initiales=$5
-       WHERE id=$6 RETURNING *`,
-      [nom, codeTitan || '', spec, disponibilite || 'disponible', avatarInitiales || '', id]
-    );
-    return normalizePrime(r.rows[0]);
-  }
-  driver.sqlite.prepare(
-    `UPDATE primes SET nom=?, code_titan=?, specialites=?, disponibilite=?, avatar_initiales=? WHERE id=?`
-  ).run(nom, codeTitan || '', spec, disponibilite || 'disponible', avatarInitiales || '', id);
-  return normalizePrime(driver.sqlite.prepare('SELECT * FROM primes WHERE id = ?').get(id));
+export async function updatePrime(id, input) {
+  return normalizePrime(await updateJsonRow('primes', id, primeData(input)));
 }
 
 export async function deletePrime(id) {
-  if (driver.kind === 'pg') {
-    await driver.pool.query('DELETE FROM primes WHERE id = $1', [id]);
-  } else {
-    driver.sqlite.prepare('DELETE FROM primes WHERE id = ?').run(id);
-  }
+  await deleteRow('primes', id);
 }
 
-// ---------- Métier : Clients ----------
+// ---------- Clients ----------
 
 function normalizeClient(row) {
   if (!row) return null;
+  const d = parseData(row.data);
   return {
     id: row.id,
-    nom: row.nom,
-    secteur: row.secteur || '',
+    nom: d.nom || '',
+    secteur: d.secteur || '',
     primeId: row.prime_id ?? null,
-    statut: row.statut || 'actif',
+    statut: d.statut || 'actif',
   };
 }
 
+function clientData({ nom, secteur, statut }) {
+  return { nom: nom || '', secteur: secteur || '', statut: statut || 'actif' };
+}
+
 export async function listClients() {
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query('SELECT * FROM clients ORDER BY nom ASC');
-    return r.rows.map(normalizeClient);
-  }
-  return driver.sqlite.prepare('SELECT * FROM clients ORDER BY nom ASC').all().map(normalizeClient);
+  return (await selectAll('clients', 'id ASC')).map(normalizeClient);
 }
 
-export async function createClient({ nom, secteur, primeId, statut }) {
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query(
-      `INSERT INTO clients (nom, secteur, prime_id, statut) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [nom, secteur || '', primeId ?? null, statut || 'actif']
-    );
-    return normalizeClient(r.rows[0]);
-  }
-  const info = driver.sqlite.prepare(
-    `INSERT INTO clients (nom, secteur, prime_id, statut) VALUES (?,?,?,?)`
-  ).run(nom, secteur || '', primeId ?? null, statut || 'actif');
-  return normalizeClient(driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(info.lastInsertRowid));
+export async function createClient(input) {
+  return normalizeClient(await insertJsonRow('clients', clientData(input), { prime_id: input.primeId ?? null }));
 }
 
-export async function updateClient(id, { nom, secteur, primeId, statut }) {
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query(
-      `UPDATE clients SET nom=$1, secteur=$2, prime_id=$3, statut=$4 WHERE id=$5 RETURNING *`,
-      [nom, secteur || '', primeId ?? null, statut || 'actif', id]
-    );
-    return normalizeClient(r.rows[0]);
-  }
-  driver.sqlite.prepare(
-    `UPDATE clients SET nom=?, secteur=?, prime_id=?, statut=? WHERE id=?`
-  ).run(nom, secteur || '', primeId ?? null, statut || 'actif', id);
-  return normalizeClient(driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(id));
+export async function updateClient(id, input) {
+  return normalizeClient(await updateJsonRow('clients', id, clientData(input), { prime_id: input.primeId ?? null }));
 }
 
 export async function deleteClient(id) {
-  if (driver.kind === 'pg') {
-    await driver.pool.query('DELETE FROM clients WHERE id = $1', [id]);
-  } else {
-    driver.sqlite.prepare('DELETE FROM clients WHERE id = ?').run(id);
-  }
+  await deleteRow('clients', id);
 }
 
-// ---------- Métier : Suivis ----------
+// ---------- Suivis ----------
 
 function normalizeSuivi(row) {
   if (!row) return null;
+  const d = parseData(row.data);
   return {
     id: row.id,
-    titre: row.titre,
+    titre: d.titre || '',
     clientId: row.client_id ?? null,
     primeId: row.prime_id ?? null,
-    statut: row.statut || 'a_faire',
-    echeance: row.echeance || null,
-    note: row.note || null,
+    statut: d.statut || 'a_faire',
+    echeance: d.echeance || null,
+    note: d.note || null,
+  };
+}
+
+function suiviData({ titre, statut, echeance, note }) {
+  return {
+    titre: titre || '',
+    statut: statut || 'a_faire',
+    echeance: echeance || null,
+    note: note || null,
   };
 }
 
 export async function listSuivis() {
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query('SELECT * FROM suivis ORDER BY echeance ASC NULLS LAST, id ASC');
-    return r.rows.map(normalizeSuivi);
-  }
-  return driver.sqlite.prepare('SELECT * FROM suivis ORDER BY echeance ASC, id ASC').all().map(normalizeSuivi);
+  return (await selectAll('suivis', 'id ASC')).map(normalizeSuivi);
 }
 
-export async function createSuivi({ titre, clientId, primeId, statut, echeance, note }) {
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query(
-      `INSERT INTO suivis (titre, client_id, prime_id, statut, echeance, note)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [titre, clientId ?? null, primeId ?? null, statut || 'a_faire', echeance || null, note || null]
-    );
-    return normalizeSuivi(r.rows[0]);
-  }
-  const info = driver.sqlite.prepare(
-    `INSERT INTO suivis (titre, client_id, prime_id, statut, echeance, note) VALUES (?,?,?,?,?,?)`
-  ).run(titre, clientId ?? null, primeId ?? null, statut || 'a_faire', echeance || null, note || null);
-  return normalizeSuivi(driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(info.lastInsertRowid));
+export async function createSuivi(input) {
+  return normalizeSuivi(await insertJsonRow('suivis', suiviData(input), { client_id: input.clientId ?? null, prime_id: input.primeId ?? null }));
 }
 
-export async function updateSuivi(id, { titre, clientId, primeId, statut, echeance, note }) {
-  if (driver.kind === 'pg') {
-    const r = await driver.pool.query(
-      `UPDATE suivis SET titre=$1, client_id=$2, prime_id=$3, statut=$4, echeance=$5, note=$6 WHERE id=$7 RETURNING *`,
-      [titre, clientId ?? null, primeId ?? null, statut || 'a_faire', echeance || null, note || null, id]
-    );
-    return normalizeSuivi(r.rows[0]);
-  }
-  driver.sqlite.prepare(
-    `UPDATE suivis SET titre=?, client_id=?, prime_id=?, statut=?, echeance=?, note=? WHERE id=?`
-  ).run(titre, clientId ?? null, primeId ?? null, statut || 'a_faire', echeance || null, note || null, id);
-  return normalizeSuivi(driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(id));
+export async function updateSuivi(id, input) {
+  return normalizeSuivi(await updateJsonRow('suivis', id, suiviData(input), { client_id: input.clientId ?? null, prime_id: input.primeId ?? null }));
 }
 
 export async function deleteSuivi(id) {
-  if (driver.kind === 'pg') {
-    await driver.pool.query('DELETE FROM suivis WHERE id = $1', [id]);
-  } else {
-    driver.sqlite.prepare('DELETE FROM suivis WHERE id = ?').run(id);
-  }
+  await deleteRow('suivis', id);
 }
 
 // ---------- Seed métier (une seule fois, si les tables sont vides) ----------
