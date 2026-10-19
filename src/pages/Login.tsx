@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ShieldCheck, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { login, confirmMfaSetup, verifyMfaLogin } from '../services/authService';
+import LogoTitan from '../components/LogoTitan';
 
 type Etape = 'credentials' | 'mfa_setup' | 'mfa_verify';
 
@@ -53,9 +54,7 @@ export default function Login() {
     <div className="flex min-h-screen items-center justify-center titan-grid px-4">
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-bz-dark2/90 p-8 shadow-titan backdrop-blur">
         <div className="mb-6 flex items-center gap-3">
-          <span className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-titan-cyan to-bz-blue text-xl font-extrabold text-bz-dark shadow-titan">
-            T
-          </span>
+          <LogoTitan size={44} />
           <div>
             <div className="text-lg font-extrabold text-white">PRIsME Prime</div>
             <div className="text-xs font-medium text-titan-cyan">Tour des Titans BZ</div>

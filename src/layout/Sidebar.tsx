@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Users, Building2, BookOpen, ListChecks, ShieldCheck, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import LogoTitan from '../components/LogoTitan';
 
 const NAV = [
   { to: '/', label: 'Tour de contrôle', icon: LayoutDashboard, end: true },
@@ -16,9 +17,7 @@ export default function Sidebar() {
   return (
     <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-white/10 bg-bz-dark">
       <div className="flex items-center gap-3 border-b border-white/10 px-6 py-5">
-        <span className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-titan-cyan to-bz-blue text-lg font-extrabold text-bz-dark shadow-titan">
-          T
-        </span>
+        <LogoTitan size={40} />
         <div>
           <div className="text-sm font-extrabold tracking-wide text-white">PRIsME Prime</div>
           <div className="text-[11px] font-medium text-titan-cyan">Tour des Titans BZ</div>
