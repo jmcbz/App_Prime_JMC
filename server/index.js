@@ -186,6 +186,89 @@ app.post('/api/admin/users/:id/reset-mfa', auth.requireAuth, auth.requireAdmin, 
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
+// ---------- Données métier : Primes / Clients / Suivis ----------
+// Lecture : tout usager authentifié. Écriture : admin seulement.
+
+function handleError(res, error, msg) {
+  console.error(msg, error);
+  res.status(500).json({ error: msg });
+}
+
+// Primes
+app.get('/api/primes', auth.requireAuth, async (_req, res) => {
+  try { res.json({ primes: await db.listPrimes() }); }
+  catch (e) { handleError(res, e, 'Erreur chargement des Primes'); }
+});
+app.post('/api/primes', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const { nom } = req.body || {};
+    if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
+    res.status(201).json({ prime: await db.createPrime(req.body) });
+  } catch (e) { handleError(res, e, 'Erreur création Prime'); }
+});
+app.put('/api/primes/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const prime = await db.updatePrime(id, req.body || {});
+    if (!prime) return res.status(404).json({ error: 'Prime introuvable' });
+    res.json({ prime });
+  } catch (e) { handleError(res, e, 'Erreur mise à jour Prime'); }
+});
+app.delete('/api/primes/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try { await db.deletePrime(parseInt(req.params.id, 10)); res.json({ success: true }); }
+  catch (e) { handleError(res, e, 'Erreur suppression Prime'); }
+});
+
+// Clients
+app.get('/api/clients', auth.requireAuth, async (_req, res) => {
+  try { res.json({ clients: await db.listClients() }); }
+  catch (e) { handleError(res, e, 'Erreur chargement des clients'); }
+});
+app.post('/api/clients', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const { nom } = req.body || {};
+    if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
+    res.status(201).json({ client: await db.createClient(req.body) });
+  } catch (e) { handleError(res, e, 'Erreur création client'); }
+});
+app.put('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const client = await db.updateClient(id, req.body || {});
+    if (!client) return res.status(404).json({ error: 'Client introuvable' });
+    res.json({ client });
+  } catch (e) { handleError(res, e, 'Erreur mise à jour client'); }
+});
+app.delete('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try { await db.deleteClient(parseInt(req.params.id, 10)); res.json({ success: true }); }
+  catch (e) { handleError(res, e, 'Erreur suppression client'); }
+});
+
+// Suivis
+app.get('/api/suivis', auth.requireAuth, async (_req, res) => {
+  try { res.json({ suivis: await db.listSuivis() }); }
+  catch (e) { handleError(res, e, 'Erreur chargement des suivis'); }
+});
+app.post('/api/suivis', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const { titre } = req.body || {};
+    if (!titre) return res.status(400).json({ error: 'Le titre est requis' });
+    res.status(201).json({ suivi: await db.createSuivi(req.body) });
+  } catch (e) { handleError(res, e, 'Erreur création suivi'); }
+});
+app.put('/api/suivis/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const suivi = await db.updateSuivi(id, req.body || {});
+    if (!suivi) return res.status(404).json({ error: 'Suivi introuvable' });
+    res.json({ suivi });
+  } catch (e) { handleError(res, e, 'Erreur mise à jour suivi'); }
+});
+app.delete('/api/suivis/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try { await db.deleteSuivi(parseInt(req.params.id, 10)); res.json({ success: true }); }
+  catch (e) { handleError(res, e, 'Erreur suppression suivi'); }
+});
+
 // ---------- Service des fichiers statiques (frontend buildé) en production ----------
 if (process.env.NODE_ENV === 'production') {
   const distPath = path.join(__dirname, '..', 'dist');
@@ -209,6 +292,7 @@ async function seedFirstAdmin() {
 async function start() {
   await db.initDb();
   await seedFirstAdmin();
+  await db.seedMetier();
   app.listen(PORT, () => console.log(`🚀 PRIsME Prime API — port ${PORT}`));
 }
 

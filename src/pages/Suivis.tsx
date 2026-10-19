@@ -1,7 +1,9 @@
 import { useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { Page, PageHeader } from '../layout/Page';
 import { Card, SuiviBadge } from '../components/ui';
-import { SUIVIS, CLIENTS, PRIMES, type StatutSuivi } from '../data/mock';
+import type { StatutSuivi } from '../services/dataService';
+import { useMetier } from '../hooks/useMetier';
 
 const COLONNES: { statut: StatutSuivi; titre: string }[] = [
   { statut: 'a_faire', titre: 'À faire' },
@@ -12,6 +14,7 @@ const COLONNES: { statut: StatutSuivi; titre: string }[] = [
 
 export default function Suivis() {
   const [vue, setVue] = useState<'tableau' | 'liste'>('tableau');
+  const { suivis, clients, primes, loading, error } = useMetier();
 
   return (
     <Page>
@@ -35,10 +38,17 @@ export default function Suivis() {
         }
       />
 
-      {vue === 'tableau' ? (
+      {loading && (
+        <div className="flex items-center gap-2 px-1 py-8 text-sm text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin" /> Chargement…
+        </div>
+      )}
+      {error && <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">{error}</div>}
+
+      {!loading && !error && (vue === 'tableau' ? (
         <div className="grid gap-4 md:grid-cols-4">
           {COLONNES.map((col) => {
-            const items = SUIVIS.filter((s) => s.statut === col.statut);
+            const items = suivis.filter((s) => s.statut === col.statut);
             return (
               <div key={col.statut}>
                 <div className="mb-2 flex items-center justify-between px-1">
@@ -47,8 +57,8 @@ export default function Suivis() {
                 </div>
                 <div className="space-y-2">
                   {items.map((s) => {
-                    const client = CLIENTS.find((c) => c.id === s.clientId);
-                    const prime = PRIMES.find((p) => p.id === s.primeId);
+                    const client = clients.find((c) => c.id === s.clientId);
+                    const prime = primes.find((p) => p.id === s.primeId);
                     return (
                       <Card key={s.id} className="p-3.5">
                         <div className="text-sm font-medium text-white">{s.titre}</div>
@@ -56,7 +66,7 @@ export default function Suivis() {
                         {s.note && <div className="mt-1.5 text-[11px] italic text-slate-500">{s.note}</div>}
                         <div className="mt-2.5 flex items-center justify-between">
                           <span className="text-[11px] text-titan-cyan">{prime?.codeTitan}</span>
-                          <span className="text-[11px] text-slate-500">{s.echeance}</span>
+                          <span className="text-[11px] text-slate-500">{s.echeance ?? '—'}</span>
                         </div>
                       </Card>
                     );
@@ -69,13 +79,13 @@ export default function Suivis() {
       ) : (
         <Card className="p-0">
           <ul className="divide-y divide-white/5">
-            {SUIVIS.map((s) => {
-              const client = CLIENTS.find((c) => c.id === s.clientId);
+            {suivis.map((s) => {
+              const client = clients.find((c) => c.id === s.clientId);
               return (
                 <li key={s.id} className="flex items-center justify-between px-5 py-3.5">
                   <div>
                     <div className="text-sm font-medium text-white">{s.titre}</div>
-                    <div className="text-xs text-slate-400">{client?.nom} • échéance {s.echeance}</div>
+                    <div className="text-xs text-slate-400">{client?.nom} • échéance {s.echeance ?? '—'}</div>
                   </div>
                   <SuiviBadge statut={s.statut} />
                 </li>
@@ -83,7 +93,7 @@ export default function Suivis() {
             })}
           </ul>
         </Card>
-      )}
+      ))}
     </Page>
   );
 }

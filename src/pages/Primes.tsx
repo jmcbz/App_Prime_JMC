@@ -1,17 +1,26 @@
+import { Loader2 } from 'lucide-react';
 import { Page, PageHeader } from '../layout/Page';
 import { Card, TitanAvatar, DispoPastille } from '../components/ui';
-import { PRIMES, CLIENTS } from '../data/mock';
+import { useMetier } from '../hooks/useMetier';
 
 export default function Primes() {
+  const { primes, clients: allClients, loading, error } = useMetier();
   return (
     <Page>
       <PageHeader
         titre="Les Primes"
         sousTitre="L’équipe des responsables de clients — chaque Prime, son code Titan et ses clients."
       />
+      {loading && (
+        <div className="flex items-center gap-2 px-1 py-8 text-sm text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin" /> Chargement…
+        </div>
+      )}
+      {error && <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">{error}</div>}
+      {!loading && !error && (
       <div className="grid gap-4 sm:grid-cols-2">
-        {PRIMES.map((p) => {
-          const clients = CLIENTS.filter((c) => p.clientsIds.includes(c.id));
+        {primes.map((p) => {
+          const clients = allClients.filter((c) => p.clientsIds.includes(c.id));
           return (
             <Card key={p.id}>
               <div className="flex items-start gap-4">
@@ -49,6 +58,7 @@ export default function Primes() {
           );
         })}
       </div>
+      )}
     </Page>
   );
 }
