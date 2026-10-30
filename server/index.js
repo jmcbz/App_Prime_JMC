@@ -285,8 +285,8 @@ async function seedFirstAdmin() {
   const existing = await db.getUserByEmail(email);
   if (existing) return;
   const passwordHash = await auth.hashPassword(password);
-  await db.createUser({ email, passwordHash, prenom: 'Jean-Michel', nom: 'Caouette', role: 'admin' });
-  console.log(`🌱 Administrateur initial créé : ${email} (mot de passe par défaut à changer).`);
+  const created = await db.seedAdminIfNone({ email, passwordHash, prenom: 'Jean-Michel', nom: 'Caouette' });
+  if (created) console.log(`🌱 Administrateur initial créé : ${email} (mot de passe par défaut à changer).`);
 }
 
 async function start() {

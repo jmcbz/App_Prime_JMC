@@ -5,6 +5,7 @@
  */
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier } from './metier-migration.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USE_PG = Boolean(process.env.DATABASE_URL);
@@ -13,6 +14,9 @@ let driver = null; // { kind, query? , sqlite? }
 
 /** Initialise la connexion et crée les tables si absentes. */
 export async function initDb() {
+  if (process.env.NODE_ENV === 'production' && !USE_PG) {
+    throw new Error('DATABASE_URL requis en production: SQLite local interdit pour App Prime');
+  }
   if (driver) return driver;
 
   if (USE_PG) {
@@ -22,9 +26,15 @@ export async function initDb() {
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.PGSSL === 'disable' ? false : { rejectUnauthorized: false },
     });
-    driver = { kind: 'pg', pool };
-    await createSchemaPg(pool);
-    console.log('✅ Base de données PostgreSQL initialisée');
+    try {
+      // Validate ownership, create missing tables and migrate as one locked transaction.
+      const legacyColumns = await migratePgMetier(pool, createSchemaPg);
+      driver = { kind: 'pg', pool, legacyColumns };
+      console.log('✅ Base de données PostgreSQL initialisée');
+    } catch (error) {
+      await pool.end();
+      throw error;
+    }
   } else {
     let BetterSqlite3;
     try {
@@ -37,12 +47,25 @@ export async function initDb() {
     }
     const dbPath = process.env.SQLITE_PATH || path.join(__dirname, '..', 'data', 'app-prime.db');
     const fs = await import('fs');
+    if (process.env.SQLITE_PATH && process.env.APP_PRIME_ALLOW_NEW_DATABASE !== '1' && !fs.existsSync(dbPath)) {
+      throw new Error('Base App Prime non reconnue: provisionnement explicite requis pour un nouveau chemin SQLite');
+    }
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     const sqlite = new BetterSqlite3(dbPath);
-    sqlite.pragma('journal_mode = WAL');
-    driver = { kind: 'sqlite', sqlite };
-    createSchemaSqlite(sqlite);
-    console.log(`✅ Base de données SQLite initialisée (${dbPath})`);
+    try {
+      sqlite.pragma('foreign_keys = ON');
+      const legacyColumns = sqlite.transaction(() => {
+        checkSqliteMetierIdentity(sqlite);
+        createSchemaSqlite(sqlite);
+        return migrateSqliteMetier(sqlite);
+      }).immediate();
+      sqlite.pragma('journal_mode = WAL');
+      driver = { kind: 'sqlite', sqlite, legacyColumns };
+      console.log(`✅ Base de données SQLite initialisée (${dbPath})`);
+    } catch (error) {
+      sqlite.close();
+      throw error;
+    }
   }
   return driver;
 }
@@ -226,6 +249,47 @@ export async function createUser({ email, passwordHash, prenom, nom, role }) {
   return getUserById(info.lastInsertRowid);
 }
 
+export async function seedAdminIfNone({ email, passwordHash, prenom, nom }) {
+  const key = String(email).trim().toLowerCase();
+  if (driver.kind === 'pg') {
+    const connection = await driver.pool.connect();
+    try {
+      await connection.query('BEGIN');
+      await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-admin-seed-v1'))");
+      const existing = await connection.query(
+        "SELECT 1 FROM users WHERE (role = 'admin' AND is_active = true) OR LOWER(email) = $1 LIMIT 1", [key],
+      );
+      let created = false;
+      if (!existing.rowCount) {
+        const result = await connection.query(
+          `INSERT INTO users (email, password_hash, prenom, nom, role)
+           VALUES ($1,$2,$3,$4,'admin') ON CONFLICT (email) DO NOTHING RETURNING id`,
+          [key, passwordHash, prenom || '', nom || ''],
+        );
+        created = result.rowCount === 1;
+      }
+      await connection.query('COMMIT');
+      return created;
+    } catch (error) {
+      await connection.query('ROLLBACK');
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+  return driver.sqlite.transaction(() => {
+    const existing = driver.sqlite.prepare(
+      "SELECT 1 FROM users WHERE (role = 'admin' AND is_active = 1) OR LOWER(email) = ? LIMIT 1",
+    ).get(key);
+    if (existing) return false;
+    const result = driver.sqlite.prepare(
+      `INSERT INTO users (email, password_hash, prenom, nom, role)
+       VALUES (?,?,?,?,'admin') ON CONFLICT(email) DO NOTHING`,
+    ).run(key, passwordHash, prenom || '', nom || '');
+    return result.changes === 1;
+  }).immediate();
+}
+
 export async function setUserActive(id, active) {
   if (driver.kind === 'pg') {
     await driver.pool.query('UPDATE users SET is_active = $1 WHERE id = $2', [!!active, id]);
@@ -320,42 +384,58 @@ function parseData(value) {
   try { return JSON.parse(value); } catch { return {}; }
 }
 
+// Keep the old typed columns usable during the additive JSON migration.
+// Clean databases have no such columns and only write `data`.
+function legacyValues(table, data) {
+  if (!driver.legacyColumns?.[table]) return {};
+  if (table === 'primes') return {
+    nom: data.nom, code_titan: data.codeTitan,
+    specialites: JSON.stringify(data.specialites), disponibilite: data.disponibilite,
+    avatar_initiales: data.avatarInitiales,
+  };
+  if (table === 'clients') return { nom: data.nom, secteur: data.secteur, statut: data.statut };
+  return { titre: data.titre, statut: data.statut, echeance: data.echeance, note: data.note };
+}
+
 /** Insère une ligne {data, <fk>} et relit (SQLite/PG). */
-async function insertJsonRow(table, data, fks = {}) {
+async function insertJsonRow(table, data, fks = {}, connection = null) {
   const json = JSON.stringify(data || {});
-  const fkCols = Object.keys(fks);
+  const fields = { ...fks, data: json, ...legacyValues(table, data) };
+  const cols = Object.keys(fields);
+  const values = Object.values(fields);
   if (driver.kind === 'pg') {
-    const cols = [...fkCols, 'data'];
-    const ph = cols.map((c, i) => (c === 'data' ? `$${i + 1}::jsonb` : `$${i + 1}`));
-    const r = await driver.pool.query(
-      `INSERT INTO ${table} (${cols.join(',')}) VALUES (${ph.join(',')}) RETURNING *`,
-      [...fkCols.map((c) => fks[c]), json]
+    const ph = cols.map((c, i) => (c === 'data' || c === 'specialites' ? `$${i + 1}::jsonb` : `$${i + 1}`));
+    const r = await (connection || driver.pool).query(
+      `INSERT INTO ${table} (${cols.join(',')}) VALUES (${ph.join(',')}) RETURNING *`, values,
     );
     return r.rows[0];
   }
-  const cols = [...fkCols, 'data'];
+  const sqliteCols = [...cols, 'updated_at'];
   const info = driver.sqlite.prepare(
-    `INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`
-  ).run(...fkCols.map((c) => fks[c]), json);
+    `INSERT INTO ${table} (${sqliteCols.join(',')}) VALUES (${cols.map(() => '?').join(',')},datetime('now'))`
+  ).run(...values);
   return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid);
 }
 
 /** Met à jour data + fks et relit. */
 async function updateJsonRow(table, id, data, fks = {}) {
   const json = JSON.stringify(data || {});
-  const fkCols = Object.keys(fks);
+  const fields = { data: json, ...fks, ...legacyValues(table, data) };
+  const cols = Object.keys(fields);
+  const values = Object.values(fields);
   if (driver.kind === 'pg') {
-    const sets = ['data = $1::jsonb', 'updated_at = CURRENT_TIMESTAMP',
-      ...fkCols.map((c, i) => `${c} = $${i + 2}`)];
+    const sets = [...cols.map((c, i) =>
+      `${c} = $${i + 1}${c === 'data' || c === 'specialites' ? '::jsonb' : ''}`),
+      'updated_at = CURRENT_TIMESTAMP'];
     const r = await driver.pool.query(
-      `UPDATE ${table} SET ${sets.join(', ')} WHERE id = $${fkCols.length + 2} RETURNING *`,
-      [json, ...fkCols.map((c) => fks[c]), id]
+      `UPDATE ${table} SET ${sets.join(', ')} WHERE id = $${cols.length + 1} RETURNING *`,
+      [...values, id]
     );
     return r.rows[0] || null;
   }
-  const sets = ["data = ?", "updated_at = datetime('now')", ...fkCols.map((c) => `${c} = ?`)];
+  const sets = [...cols.map(c => `${c} = ?`), "updated_at = datetime('now')"];
   driver.sqlite.prepare(`UPDATE ${table} SET ${sets.join(', ')} WHERE id = ?`)
-    .run(json, ...fkCols.map((c) => fks[c]), id);
+    .run(...values, id);
   return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) || null;
 }
 
@@ -398,8 +478,8 @@ export async function listPrimes() {
   return (await selectAll('primes', 'id ASC')).map(normalizePrime);
 }
 
-export async function createPrime(input) {
-  return normalizePrime(await insertJsonRow('primes', primeData(input)));
+export async function createPrime(input, connection = null) {
+  return normalizePrime(await insertJsonRow('primes', primeData(input), {}, connection));
 }
 
 export async function updatePrime(id, input) {
@@ -432,8 +512,8 @@ export async function listClients() {
   return (await selectAll('clients', 'id ASC')).map(normalizeClient);
 }
 
-export async function createClient(input) {
-  return normalizeClient(await insertJsonRow('clients', clientData(input), { prime_id: input.primeId ?? null }));
+export async function createClient(input, connection = null) {
+  return normalizeClient(await insertJsonRow('clients', clientData(input), { prime_id: input.primeId ?? null }, connection));
 }
 
 export async function updateClient(id, input) {
@@ -473,8 +553,8 @@ export async function listSuivis() {
   return (await selectAll('suivis', 'id ASC')).map(normalizeSuivi);
 }
 
-export async function createSuivi(input) {
-  return normalizeSuivi(await insertJsonRow('suivis', suiviData(input), { client_id: input.clientId ?? null, prime_id: input.primeId ?? null }));
+export async function createSuivi(input, connection = null) {
+  return normalizeSuivi(await insertJsonRow('suivis', suiviData(input), { client_id: input.clientId ?? null, prime_id: input.primeId ?? null }, connection));
 }
 
 export async function updateSuivi(id, input) {
@@ -487,9 +567,9 @@ export async function deleteSuivi(id) {
 
 // ---------- Seed métier (une seule fois, si les tables sont vides) ----------
 
-async function countRows(table) {
+async function countRows(table, connection = null) {
   if (driver.kind === 'pg') {
-    const r = await driver.pool.query(`SELECT COUNT(*)::int AS n FROM ${table}`);
+    const r = await (connection || driver.pool).query(`SELECT COUNT(*)::int AS n FROM ${table}`);
     return r.rows[0].n;
   }
   return driver.sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
@@ -497,7 +577,17 @@ async function countRows(table) {
 
 /** Insère les données initiales si primes/clients/suivis sont vides. Idempotent. */
 export async function seedMetier() {
-  if ((await countRows('primes')) > 0) return false;
+  const connection = driver.kind === 'pg' ? await driver.pool.connect() : null;
+  const execute = sql => connection ? connection.query(sql) : driver.sqlite.exec(sql);
+  try {
+    await execute(connection ? 'BEGIN' : 'BEGIN IMMEDIATE');
+    if (connection) await execute("SELECT pg_advisory_xact_lock(hashtext('app-prime-metier-seed-v1'))");
+    if ((await countRows('primes', connection)) > 0 ||
+        (await countRows('clients', connection)) > 0 ||
+        (await countRows('suivis', connection)) > 0) {
+      await execute('COMMIT');
+      return false;
+    }
 
   const primes = [
     { nom: 'Jean-Michel Caouette', codeTitan: 'Nightwing', specialites: ['M365', 'Power Automate', 'Gouvernance TI'], disponibilite: 'charge', avatarInitiales: 'JM' },
@@ -506,7 +596,7 @@ export async function seedMetier() {
     { nom: 'Maude Girard', codeTitan: 'Raven', specialites: ['Sauvegardes', 'Continuité', 'Audit'], disponibilite: 'disponible', avatarInitiales: 'MG' },
   ];
   const primeIds = [];
-  for (const p of primes) primeIds.push((await createPrime(p)).id);
+  for (const p of primes) primeIds.push((await createPrime(p, connection)).id);
 
   const clients = [
     { nom: 'Coopérative funéraire des Deux Rives', secteur: 'Services funéraires', prime: 0, statut: 'actif' },
@@ -517,7 +607,7 @@ export async function seedMetier() {
     { nom: 'APE – Services d’aide à l’emploi', secteur: 'OBNL / Emploi', prime: 3, statut: 'actif' },
   ];
   const clientIds = [];
-  for (const c of clients) clientIds.push((await createClient({ nom: c.nom, secteur: c.secteur, primeId: primeIds[c.prime], statut: c.statut })).id);
+  for (const c of clients) clientIds.push((await createClient({ nom: c.nom, secteur: c.secteur, primeId: primeIds[c.prime], statut: c.statut }, connection)).id);
 
   const suivis = [
     { titre: 'Migration SharePoint — phase pilote', client: 4, prime: 2, statut: 'en_cours', echeance: '2026-11-15', note: 'Compagnie pilote du groupe.' },
@@ -527,8 +617,15 @@ export async function seedMetier() {
     { titre: 'Rapport trimestriel Q4', client: 5, prime: 3, statut: 'a_faire', echeance: '2026-12-15' },
     { titre: 'Revue posture sécurité', client: 1, prime: 0, statut: 'en_cours', echeance: '2026-11-05' },
   ];
-  for (const s of suivis) await createSuivi({ titre: s.titre, clientId: clientIds[s.client], primeId: primeIds[s.prime], statut: s.statut, echeance: s.echeance, note: s.note || null });
+  for (const s of suivis) await createSuivi({ titre: s.titre, clientId: clientIds[s.client], primeId: primeIds[s.prime], statut: s.statut, echeance: s.echeance, note: s.note || null }, connection);
 
+  await execute('COMMIT');
   console.log('🌱 Données métier initiales insérées (primes/clients/suivis).');
   return true;
+  } catch (error) {
+    await execute('ROLLBACK');
+    throw error;
+  } finally {
+    connection?.release();
+  }
 }
