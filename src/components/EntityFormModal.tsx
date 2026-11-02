@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Loader2, Save } from 'lucide-react';
 
@@ -21,10 +21,11 @@ interface Props {
   onChange: (nom: string, valeur: unknown) => void;
   onSubmit: () => Promise<void> | void;
   onClose: () => void;
+  children?: ReactNode;
 }
 
 /** Modal de formulaire générique (thème PRIsME sombre + accents Titans). */
-export default function EntityFormModal({ titre, champs, valeurs, onChange, onSubmit, onClose }: Props) {
+export default function EntityFormModal({ titre, champs, valeurs, onChange, onSubmit, onClose, children }: Props) {
   const [busy, setBusy] = useState(false);
   const [erreur, setErreur] = useState('');
 
@@ -93,6 +94,7 @@ export default function EntityFormModal({ titre, champs, valeurs, onChange, onSu
                 </div>
               );
             })}
+            {children}
 
             {erreur && <p className="text-sm text-red-400">{erreur}</p>}
 

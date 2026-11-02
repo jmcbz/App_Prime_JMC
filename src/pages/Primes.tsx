@@ -1,12 +1,13 @@
-import { useState } from 'react';
-import { Loader2, Plus, Pencil, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Loader2, Plus, Pencil, Trash2, X } from 'lucide-react';
 import { Page, PageHeader } from '../layout/Page';
 import { Card, TitanAvatar, DispoPastille, ConfirmDialog } from '../components/ui';
 import EntityFormModal, { type ChampDef } from '../components/EntityFormModal';
 import { useMetier } from '../hooks/useMetier';
 import { useAuth } from '../context/AuthContext';
-import type { Prime } from '../services/dataService';
-import { createPrime, updatePrime, deletePrime, type PrimeInput } from '../services/metierAdminService';
+import { fetchServoClients, type Prime } from '../services/dataService';
+import { createPrime, updatePrimePortfolio, deletePrime, type PrimeInput } from '../services/metierAdminService';
+import { filterServoClients, type ServoClient } from '../lib/servoPrimeClients';
 
 const CHAMPS: ChampDef[] = [
   { nom: 'nom', label: 'Nom', type: 'text', requis: true },
@@ -30,18 +31,47 @@ export default function Primes() {
   const [form, setForm] = useState<Record<string, unknown> | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
   const [suppr, setSuppr] = useState<Prime | null>(null);
+  const [servoClients, setServoClients] = useState<ServoClient[]>([]);
+  const [servoLoading, setServoLoading] = useState(false);
+  const [servoError, setServoError] = useState('');
+  const [recherche, setRecherche] = useState('');
+  const [removedClientIds, setRemovedClientIds] = useState<number[]>([]);
+  const [addedServoIds, setAddedServoIds] = useState<number[]>([]);
+  const requestId = useRef(0);
 
-  const ouvrirAjout = () => { setEditId(null); setForm({ ...VIDE }); };
+  const fermer = () => { requestId.current += 1; setForm(null); setEditId(null); };
+  const ouvrirAjout = () => { requestId.current += 1; setEditId(null); setForm({ ...VIDE }); };
   const ouvrirEdition = (p: Prime) => {
+    const currentRequest = ++requestId.current;
     setEditId(p.id);
     setForm({ nom: p.nom, codeTitan: p.codeTitan, avatarInitiales: p.avatarInitiales, specialites: p.specialites, disponibilite: p.disponibilite });
+    setRemovedClientIds([]);
+    setAddedServoIds([]);
+    setRecherche('');
+    setServoClients([]);
+    setServoError('');
+    setServoLoading(true);
+    void fetchServoClients().then((clients) => {
+      if (requestId.current === currentRequest) setServoClients(clients);
+    }).catch((e: unknown) => {
+      if (requestId.current === currentRequest) setServoError(e instanceof Error ? e.message : 'Liste Servo indisponible');
+    }).finally(() => {
+      if (requestId.current === currentRequest) setServoLoading(false);
+    });
   };
 
   async function soumettre() {
     const payload = form as unknown as PrimeInput;
-    if (editId) await updatePrime(editId, payload); else await createPrime(payload);
-    setForm(null); setEditId(null); reload();
+    if (editId === null) await createPrime(payload);
+    else await updatePrimePortfolio(editId, payload, addedServoIds, removedClientIds);
+    fermer();
+    reload();
   }
+
+  const selectedLocalClients = allClients.filter((c) => c.primeId === editId && !removedClientIds.includes(c.id));
+  const selectedServoClients = servoClients.filter((c) => addedServoIds.includes(c.id));
+  const options = filterServoClients(servoClients, recherche).filter((c) =>
+    !addedServoIds.includes(c.id) && !selectedLocalClients.some((local) => local.servoClientId === c.id));
 
   return (
     <Page>
@@ -91,7 +121,6 @@ export default function Primes() {
                       )}
                     </div>
                   </div>
-
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     {p.specialites.map((s) => (
                       <span key={s} className="rounded-full border border-white/10 bg-white/5 px-2.5 py-0.5 text-[11px] text-slate-300">
@@ -99,7 +128,6 @@ export default function Primes() {
                       </span>
                     ))}
                   </div>
-
                   <div className="mt-4 border-t border-white/10 pt-3">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Clients ({clients.length})
@@ -117,7 +145,6 @@ export default function Primes() {
         })}
       </div>
       )}
-
       {form && (
         <EntityFormModal
           titre={editId ? 'Modifier le Prime' : 'Ajouter un Prime'}
@@ -125,8 +152,61 @@ export default function Primes() {
           valeurs={form}
           onChange={(nom, val) => setForm((f) => ({ ...(f ?? {}), [nom]: val }))}
           onSubmit={soumettre}
-          onClose={() => { setForm(null); setEditId(null); }}
-        />
+          onClose={fermer}
+        >
+          {editId !== null && (
+            <div className="border-t border-white/10 pt-3">
+              <div className="mb-1 text-xs font-medium text-slate-300">Clients du Prime</div>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedLocalClients.map((client) => (
+                  <span key={`local-${client.id}`} className="inline-flex items-center gap-1 rounded-lg bg-bz-blue/20 px-2 py-1 text-xs text-white">
+                    {client.nom}
+                    <button type="button" title={`Retirer ${client.nom}`} aria-label={`Retirer ${client.nom}`}
+                      onClick={() => setRemovedClientIds((ids) => ids.includes(client.id) ? ids : [...ids, client.id])}>
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                ))}
+                {selectedServoClients.map((client) => (
+                  <span key={`servo-${client.id}`} className="inline-flex items-center gap-1 rounded-lg bg-titan-violet/20 px-2 py-1 text-xs text-white">
+                    {client.nom}
+                    <button type="button" title={`Retirer ${client.nom}`} aria-label={`Retirer ${client.nom}`}
+                      onClick={() => setAddedServoIds((ids) => ids.filter((id) => id !== client.id))}>
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                ))}
+                {!selectedLocalClients.length && !selectedServoClients.length && <span className="text-xs text-slate-500">Aucun client sélectionné</span>}
+              </div>
+              <label htmlFor="servo-client-search" className="mb-1 mt-3 block text-xs font-medium text-slate-400">Rechercher un client actif dans Servo</label>
+              <input id="servo-client-search" type="search" value={recherche}
+                onChange={(e) => setRecherche(e.target.value)} placeholder="Nom ou alias du client"
+                className="mb-2 w-full rounded-xl border border-white/10 bg-bz-dark px-3 py-2 text-sm text-white outline-none focus:border-bz-blue" />
+              <label htmlFor="servo-client-select" className="mb-1 block text-xs font-medium text-slate-400">Ajouter un client</label>
+              <select id="servo-client-select" aria-label="Ajouter un client Servo" value=""
+                disabled={servoLoading || !!servoError}
+                onChange={(e) => {
+                  const id = Number(e.target.value);
+                  if (!id) return;
+                  const removed = allClients.find((client) => client.primeId === editId && client.servoClientId === id);
+                  if (removed) setRemovedClientIds((ids) => ids.filter((clientId) => clientId !== removed.id));
+                  else setAddedServoIds((ids) => ids.includes(id) ? ids : [...ids, id]);
+                }}
+                className="w-full rounded-xl border border-white/10 bg-bz-dark px-3 py-2 text-sm text-white outline-none focus:border-bz-blue disabled:opacity-50">
+                <option value="">{servoLoading ? 'Chargement des clients…' : '— Sélectionner un client —'}</option>
+                {options.map((client) => {
+                  const owner = allClients.find((local) => local.servoClientId === client.id)?.primeId;
+                  const otherPrime = owner && owner !== editId ? primes.find((p) => p.id === owner) : null;
+                  return <option key={client.id} value={client.id} disabled={!!otherPrime}>
+                    {client.nom}{client.alias ? ` (${client.alias})` : ''}{otherPrime ? ` — déjà attribué à ${otherPrime.nom}` : ''}
+                  </option>;
+                })}
+              </select>
+              {servoError && <p role="alert" className="mt-1 text-xs text-red-400">{servoError} — les clients déjà associés restent disponibles.</p>}
+              {!servoLoading && !servoError && <p className="mt-1 text-[11px] text-slate-500">{options.length} client(s) dans la liste. La sélection ajoute un client; seul « Retirer » enlève une association existante.</p>}
+            </div>
+          )}
+        </EntityFormModal>
       )}
       {suppr && (
         <ConfirmDialog

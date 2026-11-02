@@ -74,7 +74,11 @@ if [ "${1:-empty}" = server ]; then
   JWT_SECRET=fixture-only-secret node --input-type=module <<'JS'
 import assert from 'node:assert/strict';
 import * as auth from './server/auth.js';
-const token = auth.issueSessionToken({id:1,email:'fixture@example.test',role:'admin'});
+import * as db from './server/database/index.js';
+await db.initDb();
+await db.upsertMfaPending(1,'fixture-encrypted-secret');
+const mfaState=await db.enableMfa(1);
+const token = auth.issueSessionToken({id:1,email:'fixture@example.test',role:'admin'},mfaState);
 const base='http://127.0.0.1:31898/api/primes';
 const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
 const initial=await fetch(base,{headers});
@@ -339,7 +343,8 @@ assert.equal((await db.listPrimes())[0].nom, 'Ancien Prime');
 assert.equal((await db.listClients())[0].primeId, 1);
 assert.equal((await db.listSuivis())[0].note, 'Conserver');
 await db.updatePrime(1, { nom: 'Prime modifié', codeTitan: 'B2', specialites: ['M365', 'Réseau'], disponibilite: 'disponible', avatarInitiales: 'PM' });
-await db.updateClient(1, { nom: 'Client modifié', secteur: 'Nouveau', primeId: 1, statut: 'actif' });
+await db.updateClient(1, { nom: 'Client modifié', secteur: 'Nouveau', primeId: 1, statut: 'actif' },
+  { primeId: 1, servoClientId: null });
 await db.updateSuivi(1, { titre: 'Suivi modifié', clientId: 1, primeId: 1, statut: 'termine', echeance: null, note: 'Conservé' });
 const p = await connection.pool.query('SELECT nom, code_titan, specialites, data FROM primes WHERE id=1');
 const c = await connection.pool.query('SELECT nom, prime_id, data FROM clients WHERE id=1');

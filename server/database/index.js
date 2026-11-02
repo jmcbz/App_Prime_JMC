@@ -6,6 +6,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier } from './metier-migration.js';
+import { applyPrimePortfolio } from './prime-portfolio.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USE_PG = Boolean(process.env.DATABASE_URL);
@@ -29,6 +30,7 @@ export async function initDb() {
     try {
       // Validate ownership, create missing tables and migrate as one locked transaction.
       const legacyColumns = await migratePgMetier(pool, createSchemaPg);
+      await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_servo_id ON clients ((data->>'servoClientId')) WHERE data ? 'servoClientId'");
       driver = { kind: 'pg', pool, legacyColumns };
       console.log('✅ Base de données PostgreSQL initialisée');
     } catch (error) {
@@ -57,7 +59,9 @@ export async function initDb() {
       const legacyColumns = sqlite.transaction(() => {
         checkSqliteMetierIdentity(sqlite);
         createSchemaSqlite(sqlite);
-        return migrateSqliteMetier(sqlite);
+        const legacyColumns = migrateSqliteMetier(sqlite);
+        sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_servo_id ON clients(json_extract(data, '$.servoClientId')) WHERE json_extract(data, '$.servoClientId') IS NOT NULL");
+        return legacyColumns;
       }).immediate();
       sqlite.pragma('journal_mode = WAL');
       driver = { kind: 'sqlite', sqlite, legacyColumns };
@@ -486,6 +490,10 @@ export async function updatePrime(id, input) {
   return normalizePrime(await updateJsonRow('primes', id, primeData(input)));
 }
 
+export async function updatePrimePortfolio(id, prime, changes) {
+  return applyPrimePortfolio(driver, { primeData, clientData, legacyValues, normalizeClient, normalizePrime, parseData }, id, prime, changes);
+}
+
 export async function deletePrime(id) {
   await deleteRow('primes', id);
 }
@@ -501,11 +509,13 @@ function normalizeClient(row) {
     secteur: d.secteur || '',
     primeId: row.prime_id ?? null,
     statut: d.statut || 'actif',
+    servoClientId: Number.isSafeInteger(d.servoClientId) && d.servoClientId > 0 ? d.servoClientId : null,
   };
 }
 
-function clientData({ nom, secteur, statut }) {
-  return { nom: nom || '', secteur: secteur || '', statut: statut || 'actif' };
+function clientData({ nom, secteur, statut, servoClientId }) {
+  return { nom: nom || '', secteur: secteur || '', statut: statut || 'actif',
+    ...(Number.isSafeInteger(servoClientId) && servoClientId > 0 ? { servoClientId } : {}) };
 }
 
 export async function listClients() {
@@ -516,8 +526,44 @@ export async function createClient(input, connection = null) {
   return normalizeClient(await insertJsonRow('clients', clientData(input), { prime_id: input.primeId ?? null }, connection));
 }
 
-export async function updateClient(id, input) {
-  return normalizeClient(await updateJsonRow('clients', id, clientData(input), { prime_id: input.primeId ?? null }));
+export async function updateClient(id, input, expected) {
+  const bad = () => Object.assign(new Error('État initial du client requis'), { statusCode: 400 });
+  const conflict = () => Object.assign(new Error('Association modifiée depuis l’ouverture : rechargez les clients'), { statusCode: 409 });
+  if (!expected || !Object.hasOwn(expected, 'primeId') || !Object.hasOwn(expected, 'servoClientId') ||
+    (expected.primeId !== null && (!Number.isSafeInteger(expected.primeId) || expected.primeId <= 0)) ||
+    (expected.servoClientId !== null && (!Number.isSafeInteger(expected.servoClientId) || expected.servoClientId <= 0))) throw bad();
+  const update = (row) => {
+    const current = normalizeClient(row);
+    if (current.primeId !== expected.primeId || current.servoClientId !== expected.servoClientId) throw conflict();
+    const data = { ...parseData(row.data), ...clientData({ ...input, servoClientId: current.servoClientId }) };
+    return { data: JSON.stringify(data), prime_id: input.primeId ?? null, ...legacyValues('clients', data) };
+  };
+  if (driver.kind === 'sqlite') {
+    return driver.sqlite.transaction(() => {
+      const row = driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(id);
+      if (!row) return null;
+      const fields = update(row);
+      const keys = Object.keys(fields);
+      driver.sqlite.prepare(`UPDATE clients SET ${keys.map((key) => `${key} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+        .run(...Object.values(fields), id);
+      return normalizeClient(driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(id));
+    }).immediate();
+  }
+  const connection = await driver.pool.connect();
+  try {
+    await connection.query('BEGIN');
+    await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-servo-portfolio-v1'))");
+    const row = (await connection.query('SELECT * FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
+    if (!row) { await connection.query('ROLLBACK'); return null; }
+    const fields = update(row);
+    const keys = Object.keys(fields), values = Object.values(fields);
+    const updated = (await connection.query(`UPDATE clients SET ${keys.map((key, i) => `${key} = $${i + 1}${key === 'data' ? '::jsonb' : ''}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${keys.length + 1} RETURNING *`, [...values, id])).rows[0];
+    await connection.query('COMMIT');
+    return normalizeClient(updated);
+  } catch (error) {
+    await connection.query('ROLLBACK');
+    throw error;
+  } finally { connection.release(); }
 }
 
 export async function deleteClient(id) {

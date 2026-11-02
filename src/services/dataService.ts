@@ -1,5 +1,6 @@
 // Service de données métier — PRIsME Prime (API backend).
 // Les types restent la source de vérité partagée avec l'UI.
+import type { ServoClient } from '../lib/servoPrimeClients';
 
 export type Disponibilite = 'disponible' | 'charge' | 'surcharge';
 
@@ -19,6 +20,7 @@ export interface ClientPrime {
   secteur: string;
   primeId: number | null;
   statut: 'actif' | 'onboarding' | 'risque';
+  servoClientId?: number | null;
 }
 
 export type StatutSuivi = 'a_faire' | 'en_cours' | 'termine' | 'bloque';
@@ -66,6 +68,13 @@ export async function fetchPrimes(): Promise<Prime[]> {
 
 export async function fetchClients(): Promise<ClientPrime[]> {
   const d = await getJson<{ clients: ClientPrime[] }>('/api/clients');
+  return d.clients;
+}
+
+/** Le serveur App Prime lit Servo avec ses propres identifiants; le navigateur ne voit que cette liste. */
+export async function fetchServoClients(): Promise<ServoClient[]> {
+  const d = await getJson<{ clients: ServoClient[] }>('/api/servo/clients');
+  if (!Array.isArray(d.clients)) throw new Error('Réponse des clients Servo invalide');
   return d.clients;
 }
 

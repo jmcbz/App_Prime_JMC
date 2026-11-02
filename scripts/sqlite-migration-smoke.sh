@@ -180,7 +180,8 @@ if ((await db.listPrimes()).length === 0) {
   assert.equal((await db.listClients())[0].primeId, 1);
   assert.equal((await db.listSuivis())[0].note, 'Conserver');
   await db.updatePrime(1, {nom:'Prime modifié',codeTitan:'B2',specialites:['M365','Réseau']});
-  await db.updateClient(1, {nom:'Client modifié',primeId:1});
+  await db.updateClient(1, {nom:'Client modifié',primeId:1},
+    {primeId:1,servoClientId:null});
   await db.updateSuivi(1, {titre:'Suivi modifié',clientId:1,primeId:1});
   assert.equal(conn.sqlite.prepare('SELECT nom FROM primes WHERE id=1').get().nom, 'Prime modifié');
   assert.equal(conn.sqlite.prepare('SELECT nom FROM clients WHERE id=1').get().nom, 'Client modifié');

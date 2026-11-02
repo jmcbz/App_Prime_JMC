@@ -37,11 +37,13 @@ export default function Clients() {
 
   const [form, setForm] = useState<Record<string, unknown> | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
+  const [expectedLink, setExpectedLink] = useState<Pick<ClientPrime, 'primeId' | 'servoClientId'> | null>(null);
   const [suppr, setSuppr] = useState<ClientPrime | null>(null);
 
   const ouvrirAjout = () => { setEditId(null); setForm({ nom: '', secteur: '', primeId: '', statut: 'actif' }); };
   const ouvrirEdition = (c: ClientPrime) => {
     setEditId(c.id);
+    setExpectedLink({ primeId: c.primeId, servoClientId: c.servoClientId });
     setForm({ nom: c.nom, secteur: c.secteur, primeId: c.primeId == null ? '' : String(c.primeId), statut: c.statut });
   };
 
@@ -53,8 +55,11 @@ export default function Clients() {
       primeId: f.primeId ? Number(f.primeId) : null,
       statut: (f.statut as ClientPrime['statut']) || 'actif',
     };
-    if (editId) await updateClient(editId, payload); else await createClient(payload);
-    setForm(null); setEditId(null); reload();
+    if (editId !== null) {
+      if (!expectedLink) throw new Error('État initial du client manquant');
+      await updateClient(editId, payload, expectedLink);
+    } else await createClient(payload);
+    setForm(null); setEditId(null); setExpectedLink(null); reload();
   }
 
   return (
@@ -132,7 +137,7 @@ export default function Clients() {
           valeurs={form}
           onChange={(nom, val) => setForm((f) => ({ ...(f ?? {}), [nom]: val }))}
           onSubmit={soumettre}
-          onClose={() => { setForm(null); setEditId(null); }}
+          onClose={() => { setForm(null); setEditId(null); setExpectedLink(null); }}
         />
       )}
       {suppr && (

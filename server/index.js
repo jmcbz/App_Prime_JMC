@@ -12,6 +12,7 @@ import QRCode from 'qrcode';
 import * as db from './database/index.js';
 import * as auth from './auth.js';
 import * as mfa from './mfa-service.js';
+import { loadActiveServoClients } from './servo-clients.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 4100;
@@ -29,7 +30,8 @@ app.use(
 // ---------- Auth : login (mot de passe → MFA obligatoire) ----------
 
 async function finalizeLogin(res, user) {
-  const token = auth.issueSessionToken(user);
+  const mfaState = await db.getMfaByUserId(user.id);
+  const token = auth.issueSessionToken(user, mfaState);
   auth.setSessionCookie(res, token);
   return res.json({ success: true, user: auth.publicUser(user) });
 }
@@ -186,6 +188,16 @@ app.post('/api/admin/users/:id/reset-mfa', auth.requireAuth, auth.requireAdmin, 
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
+// L'API Servo est consultée en lecture seule côté serveur : jamais de jeton OAuth dans le navigateur.
+app.get('/api/servo/clients', auth.requireAuth, auth.requireAdmin, async (_req, res) => {
+  try { res.json({ clients: await loadActiveServoClients() }); }
+  catch (error) {
+    console.error('Lecture des clients Servo impossible:', error instanceof Error ? error.message : error);
+    res.status(error?.message === 'Configuration Servo manquante' ? 503 : 502)
+      .json({ error: 'Liste des clients Servo indisponible. Réessayez plus tard.' });
+  }
+});
+
 // ---------- Données métier : Primes / Clients / Suivis ----------
 // Lecture : tout usager authentifié. Écriture : admin seulement.
 
@@ -214,6 +226,31 @@ app.put('/api/primes/:id', auth.requireAuth, auth.requireAdmin, async (req, res)
     res.json({ prime });
   } catch (e) { handleError(res, e, 'Erreur mise à jour Prime'); }
 });
+app.put('/api/primes/:id/portfolio', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { prime, addServoIds = [], removeClientIds = [] } = req.body || {};
+    if (!Number.isSafeInteger(id) || id <= 0 || !Array.isArray(addServoIds) || !Array.isArray(removeClientIds) ||
+      addServoIds.some((value) => !Number.isSafeInteger(value) || value <= 0) ||
+      new Set(addServoIds).size !== addServoIds.length) {
+      return res.status(400).json({ error: 'Sélection de clients invalide' });
+    }
+    const catalog = addServoIds.length ? await loadActiveServoClients() : [];
+    const remote = new Map(catalog.map((client) => [client.id, client]));
+    if (addServoIds.some((clientId) => !remote.has(clientId))) {
+      return res.status(409).json({ error: 'Un client sélectionné n’est plus actif dans Servo. Rechargez la liste.' });
+    }
+    const result = await db.updatePrimePortfolio(id, prime, {
+      add: addServoIds.map((clientId) => remote.get(clientId)), remove: removeClientIds,
+      catalog,
+    });
+    if (!result) return res.status(404).json({ error: 'Prime introuvable' });
+    res.json(result);
+  } catch (error) {
+    if (error?.statusCode === 400 || error?.statusCode === 409) return res.status(error.statusCode).json({ error: error.message });
+    handleError(res, error, 'Erreur de mise à jour du portefeuille Prime');
+  }
+});
 app.delete('/api/primes/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try { await db.deletePrime(parseInt(req.params.id, 10)); res.json({ success: true }); }
   catch (e) { handleError(res, e, 'Erreur suppression Prime'); }
@@ -228,16 +265,21 @@ app.post('/api/clients', auth.requireAuth, auth.requireAdmin, async (req, res) =
   try {
     const { nom } = req.body || {};
     if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
-    res.status(201).json({ client: await db.createClient(req.body) });
+    // Seule la route portefeuille peut lier un client à l'ID officiel Servo.
+    res.status(201).json({ client: await db.createClient({ ...req.body, servoClientId: undefined }) });
   } catch (e) { handleError(res, e, 'Erreur création client'); }
 });
 app.put('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const client = await db.updateClient(id, req.body || {});
+    const { client: changes, expected } = req.body || {};
+    const client = await db.updateClient(id, changes || {}, expected);
     if (!client) return res.status(404).json({ error: 'Client introuvable' });
     res.json({ client });
-  } catch (e) { handleError(res, e, 'Erreur mise à jour client'); }
+  } catch (e) {
+    if (e?.statusCode === 400 || e?.statusCode === 409) return res.status(e.statusCode).json({ error: e.message });
+    handleError(res, e, 'Erreur mise à jour client');
+  }
 });
 app.delete('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try { await db.deleteClient(parseInt(req.params.id, 10)); res.json({ success: true }); }

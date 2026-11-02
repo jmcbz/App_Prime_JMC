@@ -4,6 +4,8 @@
  */
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'node:crypto';
+import { getUserById, getMfaByUserId } from './database/index.js';
 
 const SESSION_EXPIRES = '12h';
 const COOKIE_NAME = 'app_prime_session';
@@ -34,9 +36,16 @@ export function publicUser(user) {
   };
 }
 
-export function issueSessionToken(user) {
+function mfaVersion(mfa) {
+  if (!mfa?.mfa_enabled || !mfa.secret_encrypted) return null;
+  return crypto.createHmac('sha256', getJwtSecret()).update(mfa.secret_encrypted).digest('hex');
+}
+
+export function issueSessionToken(user, mfa) {
+  const version = mfaVersion(mfa);
+  if (!version) throw new Error('MFA confirmé requis pour créer une session');
   return jwt.sign(
-    { sub: user.id, email: user.email, role: user.role },
+    { sub: user.id, email: user.email, role: user.role, purpose: 'session', mfaVersion: version },
     getJwtSecret(),
     { expiresIn: SESSION_EXPIRES }
   );
@@ -63,16 +72,31 @@ function readToken(req) {
   return null;
 }
 
-/** Middleware : exige une session valide. Place req.auth = { sub, email, role }. */
-export function requireAuth(req, res, next) {
+/** Middleware : vérifie le jeton puis le rôle et l'état actuels en base. */
+export async function requireAuth(req, res, next) {
   const token = readToken(req);
   if (!token) return res.status(401).json({ error: 'Non authentifié' });
+  let decoded;
   try {
-    req.auth = jwt.verify(token, getJwtSecret());
-    next();
+    decoded = jwt.verify(token, getJwtSecret());
+    if (decoded.purpose !== 'session') return res.status(401).json({ error: 'Session invalide' });
   } catch {
     return res.status(401).json({ error: 'Session invalide ou expirée' });
   }
+  let user, mfa;
+  try {
+    user = await getUserById(decoded.sub);
+    if (user?.is_active) mfa = await getMfaByUserId(user.id);
+  } catch (error) {
+    console.error('Vérification de session impossible:', error);
+    return res.status(503).json({ error: 'Vérification de session indisponible' });
+  }
+  const currentVersion = mfaVersion(mfa);
+  if (!user || !user.is_active || !currentVersion || decoded.mfaVersion !== currentVersion) {
+    return res.status(401).json({ error: 'Session invalide' });
+  }
+  req.auth = { ...decoded, sub: user.id, email: user.email, role: user.role };
+  next();
 }
 
 /** Middleware : exige le rôle admin (à chaîner après requireAuth). */

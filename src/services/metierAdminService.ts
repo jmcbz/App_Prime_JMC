@@ -27,6 +27,9 @@ export async function createPrime(input: PrimeInput): Promise<Prime> {
 export async function updatePrime(id: number, input: PrimeInput): Promise<Prime> {
   return (await send<{ prime: Prime }>('PUT', `/api/primes/${id}`, input)).prime;
 }
+export async function updatePrimePortfolio(id: number, prime: PrimeInput, addServoIds: number[], removeClientIds: number[]): Promise<void> {
+  await send('PUT', `/api/primes/${id}/portfolio`, { prime, addServoIds, removeClientIds });
+}
 export async function deletePrime(id: number): Promise<void> {
   await send('DELETE', `/api/primes/${id}`);
 }
@@ -36,8 +39,8 @@ export type ClientInput = Omit<ClientPrime, 'id'>;
 export async function createClient(input: ClientInput): Promise<ClientPrime> {
   return (await send<{ client: ClientPrime }>('POST', '/api/clients', input)).client;
 }
-export async function updateClient(id: number, input: ClientInput): Promise<ClientPrime> {
-  return (await send<{ client: ClientPrime }>('PUT', `/api/clients/${id}`, input)).client;
+export async function updateClient(id: number, input: ClientInput, expected: Pick<ClientPrime, 'primeId' | 'servoClientId'>): Promise<ClientPrime> {
+  return (await send<{ client: ClientPrime }>('PUT', `/api/clients/${id}`, { client: input, expected })).client;
 }
 export async function deleteClient(id: number): Promise<void> {
   await send('DELETE', `/api/clients/${id}`);
