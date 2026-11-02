@@ -46,7 +46,7 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/primes" element={<Primes />} />
         <Route path="/clients" element={<Clients />} />
-        <Route path="/procedures" element={<Procedures />} />
+        <Route path="/procedures" element={user.role === 'admin' ? <Procedures /> : <Navigate to="/" replace />} />
         <Route path="/suivis" element={<Suivis />} />
         <Route
           path="/administration"

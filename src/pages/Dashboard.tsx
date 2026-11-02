@@ -4,8 +4,11 @@ import { Page, PageHeader } from '../layout/Page';
 import { Card, SuiviBadge, DispoPastille } from '../components/ui';
 import { PROCEDURES } from '../data/mock';
 import { useMetier } from '../hooks/useMetier';
+import { useAuth } from '../context/AuthContext';
 
 export default function Dashboard() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const { primes, clients, suivis, loading, error } = useMetier();
 
   const suivisActifs = suivis.filter((s) => s.statut === 'en_cours' || s.statut === 'a_faire');
@@ -13,7 +16,7 @@ export default function Dashboard() {
   const clientsRisque = clients.filter((c) => c.statut === 'risque');
 
   const stats = [
-    { label: 'Primes actifs', valeur: primes.length, icon: Users, accent: 'text-titan-cyan' },
+    { label: isAdmin ? 'Primes actifs' : 'Mon Prime', valeur: primes.length, icon: Users, accent: 'text-titan-cyan' },
     { label: 'Clients suivis', valeur: clients.length, icon: Building2, accent: 'text-bz-blue2' },
     { label: 'Suivis en cours', valeur: suivisActifs.length, icon: ListChecks, accent: 'text-bz-amber' },
     { label: 'Points bloqués', valeur: bloques.length, icon: AlertTriangle, accent: 'text-red-400' },
@@ -23,7 +26,7 @@ export default function Dashboard() {
     <Page>
       <PageHeader
         titre="Tour de contrôle"
-        sousTitre="Vue d’ensemble de l’équipe Prime, des clients et des suivis en cours."
+        sousTitre={isAdmin ? 'Vue d’ensemble de l’équipe Prime, des clients et des suivis en cours.' : 'Mon Prime, mes clients et mes suivis en cours.'}
       />
 
       {loading && (
@@ -35,6 +38,20 @@ export default function Dashboard() {
 
       {!loading && !error && (
         <>
+          {!isAdmin && !primes.length && (
+            <div className="mb-4 rounded-xl border border-bz-amber/30 bg-bz-amber/10 px-4 py-3 text-sm text-bz-amber">
+              Aucun Prime associé à votre compte. Communiquez avec un administrateur.
+            </div>
+          )}
+          {!isAdmin && primes[0] && (
+            <Card className="mb-6">
+              <h2 className="text-sm font-bold uppercase tracking-wide text-slate-300">Mes informations</h2>
+              <div className="mt-2 text-sm text-white">{primes[0].nom}</div>
+              <div className="text-xs text-slate-400">{user?.email}</div>
+              {primes[0].codeTitan && <div className="mt-1 text-xs text-titan-cyan">Code Titan · {primes[0].codeTitan}</div>}
+              <div className="mt-2"><DispoPastille dispo={primes[0].disponibilite} /></div>
+            </Card>
+          )}
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             {stats.map(({ label, valeur, icon: Icon, accent }) => (
               <Card key={label}>
@@ -75,7 +92,7 @@ export default function Dashboard() {
             </Card>
 
             <Card>
-              <h2 className="mb-4 text-sm font-bold uppercase tracking-wide text-slate-300">Disponibilité des Primes</h2>
+              <h2 className="mb-4 text-sm font-bold uppercase tracking-wide text-slate-300">{isAdmin ? 'Disponibilité des Primes' : 'Ma disponibilité'}</h2>
               <ul className="space-y-3">
                 {primes.map((p) => (
                   <li key={p.id} className="flex items-center justify-between">
@@ -102,7 +119,7 @@ export default function Dashboard() {
             </Card>
           </div>
 
-          <div className="mt-6">
+          {isAdmin && <div className="mt-6">
             <Card>
               <div className="flex items-center justify-between">
                 <div>
@@ -114,7 +131,7 @@ export default function Dashboard() {
                 </Link>
               </div>
             </Card>
-          </div>
+          </div>}
         </>
       )}
     </Page>

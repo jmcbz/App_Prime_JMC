@@ -2,11 +2,16 @@ import { useEffect, useState } from 'react';
 import { UserPlus, RotateCcw, ShieldCheck, ShieldAlert, Loader2, Power } from 'lucide-react';
 import { Page, PageHeader } from '../layout/Page';
 import { Card } from '../components/ui';
-import { listUsers, createUser, updateUser, resetMfa, type AdminUser } from '../services/adminService';
+import { listUsers, createUser, updateUser, resetMfa, linkExistingPrime, type AdminUser } from '../services/adminService';
+import { fetchPrimesEtClients, type ClientPrime, type Prime } from '../services/dataService';
 import type { Role } from '../services/authService';
 
 export default function Administration() {
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [primes, setPrimes] = useState<Prime[]>([]);
+  const [clients, setClients] = useState<ClientPrime[]>([]);
+  const [association, setAssociation] = useState<Record<number, string>>({});
+  const [associating, setAssociating] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [erreur, setErreur] = useState('');
   const [ok, setOk] = useState('');
@@ -17,7 +22,10 @@ export default function Administration() {
 
   async function charger() {
     try {
-      setUsers(await listUsers());
+      const [loadedUsers, portfolio] = await Promise.all([listUsers(), fetchPrimesEtClients()]);
+      setUsers(loadedUsers);
+      setPrimes(portfolio.primes);
+      setClients(portfolio.clients);
       setErreur('');
     } catch (e) {
       setErreur(e instanceof Error ? e.message : 'Erreur de chargement');
@@ -36,13 +44,27 @@ export default function Administration() {
     try {
       await createUser(form);
       setForm({ prenom: '', nom: '', email: '', password: '', role: 'prime' });
-      flash('Usager créé. Le MFA sera configuré à sa première connexion.');
+      flash('Usager et Prime associé créés. Le MFA sera configuré à la première connexion.');
       await charger();
     } catch (e) {
       setErreur(e instanceof Error ? e.message : 'Erreur de création');
     } finally {
       setCreating(false);
     }
+  }
+
+  async function associerPrime(u: AdminUser) {
+    const primeId = Number(association[u.id]);
+    if (!primeId) return;
+    setErreur(''); setAssociating(u.id);
+    try {
+      await linkExistingPrime(u.id, primeId);
+      setAssociation((prev) => ({ ...prev, [u.id]: '' }));
+      await charger();
+      flash('Prime existant associé au compte.');
+    } catch (e) {
+      setErreur(e instanceof Error ? e.message : 'Erreur d’association');
+    } finally { setAssociating(null); }
   }
 
   async function changerRole(u: AdminUser, role: Role) {
@@ -90,7 +112,7 @@ export default function Administration() {
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-bz-blue py-2.5 text-sm font-semibold text-white transition-colors hover:bg-bz-blue2 disabled:opacity-60">
               {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />} Créer l’usager
             </button>
-            <p className="text-[11px] text-slate-500">Le MFA (TOTP) est obligatoire : l’usager le configure lui-même à sa première connexion.</p>
+            <p className="text-[11px] text-slate-500">Un Prime personnel est créé automatiquement pour chaque nouvel usager. Le MFA (TOTP) est obligatoire à sa première connexion.</p>
           </form>
         </Card>
 
@@ -113,6 +135,26 @@ export default function Administration() {
                       {!u.is_active && <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] font-medium text-red-400">Désactivé</span>}
                     </div>
                     <div className="text-xs text-slate-400">{u.email}</div>
+                    <div className="mt-1 text-xs text-titan-cyan">Prime associé : {u.primeNom || 'Aucun (compte existant)'}</div>
+                    {u.primeId === null && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <select aria-label={`Prime à associer à ${u.prenom} ${u.nom}`}
+                          value={association[u.id] || ''}
+                          onChange={(e) => setAssociation((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                          className="max-w-64 rounded-lg border border-white/10 bg-bz-dark px-2 py-1 text-xs text-white outline-none focus:border-bz-blue">
+                          <option value="">— Prime existant à associer —</option>
+                          {primes.filter((p) => !users.some((owner) => owner.primeId === p.id)).map((p) => {
+                            const names = clients.filter((c) => c.primeId === p.id).slice(0, 2).map((c) => c.nom);
+                            return <option key={p.id} value={p.id}>{p.nom}{p.codeTitan ? ` · ${p.codeTitan}` : ''}{names.length ? ` · ${names.join(', ')}` : ' · sans client'}</option>;
+                          })}
+                        </select>
+                        <button type="button" disabled={!association[u.id] || associating === u.id}
+                          onClick={() => associerPrime(u)}
+                          className="rounded-lg border border-titan-cyan/30 bg-titan-cyan/10 px-2 py-1 text-xs font-medium text-titan-cyan disabled:opacity-40">
+                          Associer
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <select value={u.role} onChange={(e) => changerRole(u, e.target.value as Role)}

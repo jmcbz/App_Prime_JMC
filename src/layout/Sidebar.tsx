@@ -25,7 +25,7 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-1 px-3 py-4">
-        {NAV.map(({ to, label, icon: Icon, end }) => (
+        {NAV.filter(({ to }) => to !== '/procedures' || user?.role === 'admin').map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
             to={to}
@@ -37,7 +37,7 @@ export default function Sidebar() {
             }
           >
             <Icon className="h-[18px] w-[18px]" />
-            {label}
+            {to === '/primes' && user?.role !== 'admin' ? 'Mon Prime' : label}
           </NavLink>
         ))}
 

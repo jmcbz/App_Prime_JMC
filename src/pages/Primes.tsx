@@ -76,8 +76,8 @@ export default function Primes() {
   return (
     <Page>
       <PageHeader
-        titre="Les Primes"
-        sousTitre="L’équipe des responsables de clients — chaque Prime, son code Titan et ses clients."
+        titre={isAdmin ? 'Les Primes' : 'Mon Prime'}
+        sousTitre={isAdmin ? 'L’équipe des responsables de clients — chaque Prime, son code Titan et ses clients.' : 'Mon profil Prime et mes clients associés.'}
         action={isAdmin && (
           <button onClick={ouvrirAjout}
             className="inline-flex items-center gap-2 rounded-xl bg-bz-blue px-3.5 py-2 text-sm font-semibold text-white hover:bg-bz-blue2">

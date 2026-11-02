@@ -116,6 +116,10 @@ function createSchemaSqlite(sqlite) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS prime_user_links (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      prime_id INTEGER NOT NULL UNIQUE REFERENCES primes(id) ON DELETE RESTRICT
+    );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
   `);
@@ -162,6 +166,10 @@ async function createSchemaPg(pool) {
       data JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS prime_user_links (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      prime_id INTEGER NOT NULL UNIQUE REFERENCES primes(id) ON DELETE RESTRICT
     );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
@@ -217,21 +225,29 @@ export async function getUserById(id) {
 export async function listUsers() {
   if (driver.kind === 'pg') {
     const r = await driver.pool.query(`
-      SELECT u.*, m.mfa_enabled, m.pending_setup
+      SELECT u.*, m.mfa_enabled, m.pending_setup, link.prime_id AS linked_prime_id, p.data AS prime_data
       FROM users u LEFT JOIN user_mfa m ON m.user_id = u.id
+      LEFT JOIN prime_user_links link ON link.user_id = u.id
+      LEFT JOIN primes p ON p.id = link.prime_id
       ORDER BY u.nom ASC, u.prenom ASC`);
     return r.rows.map((row) => ({
       ...normalizeUser(row),
+      primeId: row.linked_prime_id ?? null,
+      primeNom: row.prime_data ? parseData(row.prime_data).nom || null : null,
       mfa_enabled: row.mfa_enabled === true,
       mfa_pending: row.pending_setup === true,
     }));
   }
   const rows = driver.sqlite.prepare(`
-    SELECT u.*, m.mfa_enabled, m.pending_setup
+    SELECT u.*, m.mfa_enabled, m.pending_setup, link.prime_id AS linked_prime_id, p.data AS prime_data
     FROM users u LEFT JOIN user_mfa m ON m.user_id = u.id
+    LEFT JOIN prime_user_links link ON link.user_id = u.id
+    LEFT JOIN primes p ON p.id = link.prime_id
     ORDER BY u.nom ASC, u.prenom ASC`).all();
   return rows.map((row) => ({
     ...normalizeUser(row),
+    primeId: row.linked_prime_id ?? null,
+    primeNom: row.prime_data ? parseData(row.prime_data).nom || null : null,
     mfa_enabled: row.mfa_enabled === 1,
     mfa_pending: row.pending_setup === 1,
   }));
@@ -251,6 +267,85 @@ export async function createUser({ email, passwordHash, prenom, nom, role }) {
     `INSERT INTO users (email, password_hash, prenom, nom, role) VALUES (?,?,?,?,?)`
   ).run(key, passwordHash, prenom || '', nom || '', role || 'prime');
   return getUserById(info.lastInsertRowid);
+}
+
+export async function createUserWithPrime({ email, passwordHash, prenom, nom, role }) {
+  const key = String(email).trim().toLowerCase();
+  const displayName = [prenom, nom].map((part) => String(part || '').trim()).filter(Boolean).join(' ') || key.split('@')[0];
+  const initials = [prenom, nom].map((part) => String(part || '').trim().charAt(0).toUpperCase()).join('') || displayName.slice(0, 2).toUpperCase();
+  const profile = { nom: displayName, avatarInitiales: initials, codeTitan: '', specialites: [], disponibilite: 'disponible' };
+  if (driver.kind === 'pg') {
+    const connection = await driver.pool.connect();
+    try {
+      await connection.query('BEGIN');
+      const result = await connection.query(
+        `INSERT INTO users (email, password_hash, prenom, nom, role)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [key, passwordHash, prenom || '', nom || '', role || 'prime']);
+      const user = normalizeUser(result.rows[0]);
+      const prime = await createPrime(profile, connection);
+      await connection.query('INSERT INTO prime_user_links (user_id, prime_id) VALUES ($1,$2)', [user.id, prime.id]);
+      await connection.query('COMMIT');
+      return { user, prime };
+    } catch (error) {
+      await connection.query('ROLLBACK');
+      throw error;
+    } finally { connection.release(); }
+  }
+  const ids = driver.sqlite.transaction(() => {
+    const user = driver.sqlite.prepare('INSERT INTO users (email, password_hash, prenom, nom, role) VALUES (?,?,?,?,?)')
+      .run(key, passwordHash, prenom || '', nom || '', role || 'prime');
+    const data = primeData(profile);
+    const fields = { data: JSON.stringify(data), ...legacyValues('primes', data) };
+    const columns = [...Object.keys(fields), 'updated_at'];
+    const prime = driver.sqlite.prepare(`INSERT INTO primes (${columns.join(',')}) VALUES (${Object.keys(fields).map(() => '?').join(',')},datetime('now'))`)
+      .run(...Object.values(fields));
+    driver.sqlite.prepare('INSERT INTO prime_user_links (user_id, prime_id) VALUES (?,?)')
+      .run(user.lastInsertRowid, prime.lastInsertRowid);
+    return { userId: user.lastInsertRowid, primeId: prime.lastInsertRowid };
+  }).immediate();
+  return { user: await getUserById(ids.userId), prime: await getPrimeForUser(ids.userId) };
+}
+
+export async function getPrimeForUser(userId) {
+  if (driver.kind === 'pg') {
+    const result = await driver.pool.query(
+      'SELECT p.* FROM primes p JOIN prime_user_links link ON link.prime_id = p.id WHERE link.user_id = $1', [userId]);
+    return normalizePrime(result.rows[0]);
+  }
+  return normalizePrime(driver.sqlite.prepare(
+    'SELECT p.* FROM primes p JOIN prime_user_links link ON link.prime_id = p.id WHERE link.user_id = ?').get(userId));
+}
+
+export async function linkExistingUserToPrime(userId, primeId) {
+  const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !Number.isSafeInteger(primeId) || primeId <= 0) {
+    throw fail(400, 'Usager ou Prime invalide');
+  }
+  if (driver.kind === 'pg') {
+    const connection = await driver.pool.connect();
+    try {
+      await connection.query('BEGIN');
+      const user = await connection.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
+      const prime = await connection.query('SELECT id FROM primes WHERE id = $1 FOR KEY SHARE', [primeId]);
+      if (!user.rowCount || !prime.rowCount) throw fail(404, 'Usager ou Prime introuvable');
+      const inserted = await connection.query(
+        'INSERT INTO prime_user_links (user_id, prime_id) VALUES ($1,$2) ON CONFLICT DO NOTHING RETURNING user_id', [userId, primeId]);
+      if (!inserted.rowCount) throw fail(409, 'Cet usager ou ce Prime possède déjà une association');
+      await connection.query('COMMIT');
+    } catch (error) { await connection.query('ROLLBACK'); throw error; }
+    finally { connection.release(); }
+  } else {
+    driver.sqlite.transaction(() => {
+      const user = driver.sqlite.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+      const prime = driver.sqlite.prepare('SELECT id FROM primes WHERE id = ?').get(primeId);
+      if (!user || !prime) throw fail(404, 'Usager ou Prime introuvable');
+      const inserted = driver.sqlite.prepare('INSERT INTO prime_user_links (user_id, prime_id) VALUES (?,?) ON CONFLICT DO NOTHING')
+        .run(userId, primeId);
+      if (!inserted.changes) throw fail(409, 'Cet usager ou ce Prime possède déjà une association');
+    }).immediate();
+  }
+  return getPrimeForUser(userId);
 }
 
 export async function seedAdminIfNone({ email, passwordHash, prenom, nom }) {
@@ -482,6 +577,11 @@ export async function listPrimes() {
   return (await selectAll('primes', 'id ASC')).map(normalizePrime);
 }
 
+export async function listPrimesForUser(userId) {
+  const own = await getPrimeForUser(userId);
+  return own ? [own] : [];
+}
+
 export async function createPrime(input, connection = null) {
   return normalizePrime(await insertJsonRow('primes', primeData(input), {}, connection));
 }
@@ -495,7 +595,16 @@ export async function updatePrimePortfolio(id, prime, changes) {
 }
 
 export async function deletePrime(id) {
-  await deleteRow('primes', id);
+  try { await deleteRow('primes', id); }
+  catch (error) {
+    if (error.code === '23503' || error.code === 'SQLITE_CONSTRAINT_FOREIGNKEY'
+      || (error.code === 'SQLITE_CONSTRAINT_TRIGGER' && error.message === 'FOREIGN KEY constraint failed')) {
+      const conflict = new Error('Ce Prime est relié à un usager et ne peut pas être supprimé');
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    throw error;
+  }
 }
 
 // ---------- Clients ----------
@@ -522,6 +631,16 @@ export async function listClients() {
   return (await selectAll('clients', 'id ASC')).map(normalizeClient);
 }
 
+export async function listClientsForUser(userId) {
+  const sql = `SELECT c.* FROM clients c
+    JOIN prime_user_links link ON link.prime_id = c.prime_id
+    WHERE link.user_id = ${driver.kind === 'pg' ? '$1' : '?'} ORDER BY c.id`;
+  const rows = driver.kind === 'pg'
+    ? (await driver.pool.query(sql, [userId])).rows
+    : driver.sqlite.prepare(sql).all(userId);
+  return rows.map(normalizeClient);
+}
+
 export async function createClient(input, connection = null) {
   return normalizeClient(await insertJsonRow('clients', clientData(input), { prime_id: input.primeId ?? null }, connection));
 }
@@ -546,6 +665,10 @@ export async function updateClient(id, input, expected) {
       const keys = Object.keys(fields);
       driver.sqlite.prepare(`UPDATE clients SET ${keys.map((key) => `${key} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
         .run(...Object.values(fields), id);
+      if (row.prime_id !== (input.primeId ?? null)) {
+        driver.sqlite.prepare("UPDATE suivis SET prime_id = ?, updated_at = datetime('now') WHERE client_id = ?")
+          .run(input.primeId ?? null, id);
+      }
       return normalizeClient(driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(id));
     }).immediate();
   }
@@ -558,6 +681,9 @@ export async function updateClient(id, input, expected) {
     const fields = update(row);
     const keys = Object.keys(fields), values = Object.values(fields);
     const updated = (await connection.query(`UPDATE clients SET ${keys.map((key, i) => `${key} = $${i + 1}${key === 'data' ? '::jsonb' : ''}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${keys.length + 1} RETURNING *`, [...values, id])).rows[0];
+    if (row.prime_id !== (input.primeId ?? null)) {
+      await connection.query('UPDATE suivis SET prime_id = $1, updated_at = CURRENT_TIMESTAMP WHERE client_id = $2', [input.primeId ?? null, id]);
+    }
     await connection.query('COMMIT');
     return normalizeClient(updated);
   } catch (error) {
@@ -597,6 +723,20 @@ function suiviData({ titre, statut, echeance, note }) {
 
 export async function listSuivis() {
   return (await selectAll('suivis', 'id ASC')).map(normalizeSuivi);
+}
+
+export async function listSuivisForUser(userId) {
+  const sql = `SELECT s.*, CASE WHEN s.client_id IS NULL THEN s.prime_id ELSE c.prime_id END AS effective_prime_id
+    FROM suivis s
+    LEFT JOIN clients c ON c.id = s.client_id
+    JOIN prime_user_links link ON link.prime_id =
+      CASE WHEN s.client_id IS NULL THEN s.prime_id ELSE c.prime_id END
+    WHERE link.user_id = ${driver.kind === 'pg' ? '$1' : '?'}
+    ORDER BY s.id`;
+  const rows = driver.kind === 'pg'
+    ? (await driver.pool.query(sql, [userId])).rows
+    : driver.sqlite.prepare(sql).all(userId);
+  return rows.map((row) => ({ ...normalizeSuivi(row), primeId: row.effective_prime_id }));
 }
 
 export async function createSuivi(input, connection = null) {

@@ -11,20 +11,24 @@ const CORE = {
   suivis: ['id', 'client_id', 'prime_id', 'created_at'],
 };
 const LEGACY_REQUIRED = { primes: 'nom', clients: 'nom', suivis: 'titre' };
-const OWNED_TABLES = new Set(['users', 'user_mfa', ...Object.keys(TABLES)]);
+const OWNED_TABLES = new Set(['users', 'user_mfa', 'prime_user_links', ...Object.keys(TABLES)]);
 const USER_COLUMNS = {
   users: ['id', 'email', 'password_hash', 'prenom', 'nom', 'role', 'is_active', 'created_at'],
   user_mfa: ['user_id', 'secret_encrypted', 'mfa_enabled', 'pending_setup', 'enabled_at', 'created_at', 'updated_at'],
+  prime_user_links: ['user_id', 'prime_id'],
 };
 const PG_TYPES = {
   users: { id: 'int4', email: 'text', password_hash: 'text', is_active: 'bool', created_at: 'timestamp' },
   user_mfa: { user_id: 'int4', secret_encrypted: 'text', mfa_enabled: 'bool', pending_setup: 'bool' },
+  prime_user_links: { user_id: 'int4', prime_id: 'int4' },
   primes: { id: 'int4', created_at: 'timestamp', specialites: 'jsonb' },
   clients: { id: 'int4', prime_id: 'int4', created_at: 'timestamp' },
   suivis: { id: 'int4', client_id: 'int4', prime_id: 'int4', created_at: 'timestamp' },
 };
 const PG_FOREIGN_KEYS = [
   ['user_mfa', 'user_id', 'users', 'id', 'CASCADE'],
+  ['prime_user_links', 'user_id', 'users', 'id', 'CASCADE'],
+  ['prime_user_links', 'prime_id', 'primes', 'id', 'RESTRICT'],
   ['clients', 'prime_id', 'primes', 'id', 'SET NULL'],
   ['suivis', 'client_id', 'clients', 'id', 'CASCADE'],
   ['suivis', 'prime_id', 'primes', 'id', 'SET NULL'],
@@ -32,6 +36,7 @@ const PG_FOREIGN_KEYS = [
 const SQLITE_TYPES = {
   users: { id: 'INTEGER', email: 'TEXT', password_hash: 'TEXT', is_active: 'INTEGER' },
   user_mfa: { user_id: 'INTEGER', secret_encrypted: 'TEXT', mfa_enabled: 'INTEGER', pending_setup: 'INTEGER' },
+  prime_user_links: { user_id: 'INTEGER', prime_id: 'INTEGER' },
   primes: { id: 'INTEGER', created_at: 'TEXT', specialites: 'TEXT' },
   clients: { id: 'INTEGER', prime_id: 'INTEGER', created_at: 'TEXT' },
   suivis: { id: 'INTEGER', client_id: 'INTEGER', prime_id: 'INTEGER', created_at: 'TEXT' },
@@ -96,6 +101,7 @@ export async function checkPgMetierIdentity(pool) {
     for (const table of Object.keys(USER_COLUMNS)) {
       allColumns[table] = new Map(userColumns.rows.filter(row => row.table_name === table)
         .map(row => [row.column_name, row.udt_name]));
+      if (table === 'prime_user_links' && !names.has(table)) continue;
       if (USER_COLUMNS[table].some(column => !allColumns[table].has(column))) {
         throw new Error(`Schéma étranger à App Prime: ${table} incompatible`);
       }
@@ -109,7 +115,7 @@ export async function checkPgMetierIdentity(pool) {
       }
     }
     const keys = await pool.query(
-      `SELECT tc.table_name, kcu.column_name, tc.constraint_type,
+      `SELECT tc.table_name, tc.constraint_name, kcu.column_name, tc.constraint_type,
               ccu.table_name AS referenced_table, ccu.column_name AS referenced_column,
               rc.delete_rule
        FROM information_schema.table_constraints tc
@@ -119,12 +125,22 @@ export async function checkPgMetierIdentity(pool) {
          ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
        LEFT JOIN information_schema.referential_constraints rc
          ON tc.constraint_name = rc.constraint_name AND tc.constraint_schema = rc.constraint_schema
-       WHERE tc.table_schema = current_schema() AND tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY')`,
+       WHERE tc.table_schema = current_schema() AND tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY','UNIQUE')`,
     );
     for (const table of names) {
-      const key = table === 'user_mfa' ? 'user_id' : 'id';
+      const key = table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
       if (!keys.rows.some(row => row.table_name === table && row.constraint_type === 'PRIMARY KEY' && row.column_name === key)) {
         throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${key} absente`);
+      }
+    }
+    if (names.has('prime_user_links')) {
+      const groups = new Map();
+      for (const row of keys.rows.filter(row => row.table_name === 'prime_user_links' && row.constraint_type === 'UNIQUE')) {
+        if (!groups.has(row.constraint_name)) groups.set(row.constraint_name, []);
+        groups.get(row.constraint_name).push(row.column_name);
+      }
+      if (![...groups.values()].some(columns => columns.length === 1 && columns[0] === 'prime_id')) {
+        throw new Error('Schéma étranger à App Prime: unicité prime_user_links.prime_id absente');
       }
     }
     for (const [table, column, refTable, refColumn, deleteRule] of PG_FOREIGN_KEYS) {
@@ -223,6 +239,7 @@ export function checkSqliteMetierIdentity(sqlite) {
       throw new Error('Schéma App Prime incomplet: tables attendues absentes');
     }
     for (const [table, expected] of Object.entries(USER_COLUMNS)) {
+      if (table === 'prime_user_links' && !names.has(table)) continue;
       const actual = sqliteColumns(sqlite, table);
       if (expected.some(column => !actual.has(column))) {
         throw new Error(`Schéma étranger à App Prime: ${table} incompatible`);
@@ -233,9 +250,21 @@ export function checkSqliteMetierIdentity(sqlite) {
   for (const table of names) {
     const rows = sqlite.prepare(`PRAGMA table_info(${table})`).all();
     const columns = new Map(rows.map(row => [row.name, row]));
-    const primaryKey = table === 'user_mfa' ? 'user_id' : 'id';
+    const primaryKey = table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
     if (rows.filter(row => row.pk).length !== 1 || columns.get(primaryKey)?.pk !== 1) {
       throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${primaryKey} incompatible`);
+    }
+    if (table === 'prime_user_links') {
+      if (columns.get('prime_id')?.notnull !== 1) {
+        throw new Error('Schéma étranger à App Prime: prime_user_links.prime_id nullable');
+      }
+      const unique = sqlite.prepare('PRAGMA index_list(prime_user_links)').all().some(index => {
+        if (index.unique !== 1) return false;
+        const escaped = index.name.replaceAll('"', '""');
+        const indexed = sqlite.prepare(`PRAGMA index_info("${escaped}")`).all();
+        return indexed.length === 1 && indexed[0].name === 'prime_id';
+      });
+      if (!unique) throw new Error('Schéma étranger à App Prime: unicité prime_user_links.prime_id absente');
     }
     for (const [column, type] of Object.entries(SQLITE_TYPES[table])) {
       if (columns.has(column) && columns.get(column).type.toUpperCase() !== type) {

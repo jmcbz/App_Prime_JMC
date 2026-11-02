@@ -125,7 +125,7 @@ app.get('/api/auth/me', auth.requireAuth, async (req, res) => {
 
 app.get('/api/admin/users', auth.requireAuth, auth.requireAdmin, async (_req, res) => {
   const users = await db.listUsers();
-  res.json({ users: users.map((u) => ({ ...auth.publicUser(u), mfa_enabled: u.mfa_enabled, mfa_pending: u.mfa_pending })) });
+  res.json({ users: users.map((u) => ({ ...auth.publicUser(u), primeId: u.primeId, primeNom: u.primeNom, mfa_enabled: u.mfa_enabled, mfa_pending: u.mfa_pending })) });
 });
 
 app.post('/api/admin/users', auth.requireAuth, auth.requireAdmin, async (req, res) => {
@@ -137,11 +137,22 @@ app.post('/api/admin/users', auth.requireAuth, auth.requireAdmin, async (req, re
     const exists = await db.getUserByEmail(email);
     if (exists) return res.status(409).json({ error: 'Un usager avec ce courriel existe déjà' });
     const passwordHash = await auth.hashPassword(password);
-    const user = await db.createUser({ email, passwordHash, prenom, nom, role: role || 'prime' });
-    res.status(201).json({ user: auth.publicUser(user) });
+    const created = await db.createUserWithPrime({ email, passwordHash, prenom, nom, role: role || 'prime' });
+    res.status(201).json({ user: auth.publicUser(created.user), prime: created.prime });
   } catch (error) {
     console.error('Erreur création usager:', error);
     res.status(500).json({ error: 'Erreur lors de la création de l’usager' });
+  }
+});
+
+app.post('/api/admin/users/:id/prime', auth.requireAuth, auth.requireAdmin, async (req, res) => {
+  try {
+    const prime = await db.linkExistingUserToPrime(Number(req.params.id), req.body?.primeId);
+    res.json({ prime });
+  } catch (error) {
+    if ([400, 404, 409].includes(error?.statusCode)) return res.status(error.statusCode).json({ error: error.message });
+    console.error('Erreur association du Prime:', error);
+    res.status(500).json({ error: 'Erreur lors de l’association du Prime' });
   }
 });
 
@@ -207,8 +218,8 @@ function handleError(res, error, msg) {
 }
 
 // Primes
-app.get('/api/primes', auth.requireAuth, async (_req, res) => {
-  try { res.json({ primes: await db.listPrimes() }); }
+app.get('/api/primes', auth.requireAuth, async (req, res) => {
+  try { res.json({ primes: req.auth.role === 'admin' ? await db.listPrimes() : await db.listPrimesForUser(req.auth.sub) }); }
   catch (e) { handleError(res, e, 'Erreur chargement des Primes'); }
 });
 app.post('/api/primes', auth.requireAuth, auth.requireAdmin, async (req, res) => {
@@ -253,12 +264,15 @@ app.put('/api/primes/:id/portfolio', auth.requireAuth, auth.requireAdmin, async 
 });
 app.delete('/api/primes/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try { await db.deletePrime(parseInt(req.params.id, 10)); res.json({ success: true }); }
-  catch (e) { handleError(res, e, 'Erreur suppression Prime'); }
+  catch (e) {
+    if (e?.statusCode === 409) return res.status(409).json({ error: e.message });
+    handleError(res, e, 'Erreur suppression Prime');
+  }
 });
 
 // Clients
-app.get('/api/clients', auth.requireAuth, async (_req, res) => {
-  try { res.json({ clients: await db.listClients() }); }
+app.get('/api/clients', auth.requireAuth, async (req, res) => {
+  try { res.json({ clients: req.auth.role === 'admin' ? await db.listClients() : await db.listClientsForUser(req.auth.sub) }); }
   catch (e) { handleError(res, e, 'Erreur chargement des clients'); }
 });
 app.post('/api/clients', auth.requireAuth, auth.requireAdmin, async (req, res) => {
@@ -287,8 +301,8 @@ app.delete('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, 
 });
 
 // Suivis
-app.get('/api/suivis', auth.requireAuth, async (_req, res) => {
-  try { res.json({ suivis: await db.listSuivis() }); }
+app.get('/api/suivis', auth.requireAuth, async (req, res) => {
+  try { res.json({ suivis: req.auth.role === 'admin' ? await db.listSuivis() : await db.listSuivisForUser(req.auth.sub) }); }
   catch (e) { handleError(res, e, 'Erreur chargement des suivis'); }
 });
 app.post('/api/suivis', auth.requireAuth, auth.requireAdmin, async (req, res) => {

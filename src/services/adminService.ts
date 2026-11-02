@@ -4,6 +4,8 @@ import type { Role, User } from './authService';
 const API = '/api/admin';
 
 export interface AdminUser extends User {
+  primeId: number | null;
+  primeNom: string | null;
   mfa_enabled: boolean;
   mfa_pending: boolean;
 }
@@ -33,6 +35,17 @@ export async function createUser(input: {
   const d = await parseJson(r);
   if (!r.ok) throw new Error(d.error || 'Erreur de création');
   return d.user;
+}
+
+export async function linkExistingPrime(userId: number, primeId: number): Promise<void> {
+  const r = await fetch(`${API}/users/${userId}/prime`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ primeId }),
+  });
+  const d = await parseJson(r);
+  if (!r.ok) throw new Error(d.error || 'Erreur d’association du Prime');
 }
 
 export async function updateUser(id: number, patch: { role?: Role; is_active?: boolean }): Promise<User> {

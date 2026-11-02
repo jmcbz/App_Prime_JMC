@@ -54,11 +54,15 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
       for (const clientId of actions.remove) {
         const result = sqlite.prepare("UPDATE clients SET prime_id = NULL, updated_at = datetime('now') WHERE id = ? AND prime_id = ?").run(clientId, id);
         if (result.changes !== 1) throw conflict('Association modifiée pendant la sauvegarde');
+        sqlite.prepare("UPDATE suivis SET prime_id = NULL, updated_at = datetime('now') WHERE client_id = ?")
+          .run(clientId);
       }
       for (const client of actions.assign) {
         const result = sqlite.prepare("UPDATE clients SET prime_id = ?, data = ?, updated_at = datetime('now') WHERE id = ? AND (prime_id IS NULL OR prime_id = ?)")
           .run(id, JSON.stringify(client.data), client.id, id);
         if (result.changes !== 1) throw conflict('Association modifiée pendant la sauvegarde');
+        sqlite.prepare("UPDATE suivis SET prime_id = ?, updated_at = datetime('now') WHERE client_id = ?")
+          .run(id, client.id);
       }
       for (const remote of actions.create) {
         const fields = { prime_id: id, ...sqlFields('clients', clientData({ nom: remote.nom, secteur: '', statut: 'actif', servoClientId: remote.id }), legacyValues) };
@@ -84,10 +88,12 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
     for (const clientId of actions.remove) {
       const result = await connection.query('UPDATE clients SET prime_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND prime_id = $2 RETURNING id', [clientId, id]);
       if (result.rowCount !== 1) throw conflict('Association modifiée pendant la sauvegarde');
+      await connection.query('UPDATE suivis SET prime_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE client_id = $1', [clientId]);
     }
     for (const client of actions.assign) {
       const result = await connection.query('UPDATE clients SET prime_id = $1, data = $2::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND (prime_id IS NULL OR prime_id = $1) RETURNING id', [id, JSON.stringify(client.data), client.id]);
       if (result.rowCount !== 1) throw conflict('Association modifiée pendant la sauvegarde');
+      await connection.query('UPDATE suivis SET prime_id = $1, updated_at = CURRENT_TIMESTAMP WHERE client_id = $2', [id, client.id]);
     }
     for (const remote of actions.create) {
       const fields = { prime_id: id, ...sqlFields('clients', clientData({ nom: remote.nom, secteur: '', statut: 'actif', servoClientId: remote.id }), legacyValues) };
