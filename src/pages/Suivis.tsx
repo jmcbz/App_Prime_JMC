@@ -7,6 +7,7 @@ import { useMetier } from '../hooks/useMetier';
 import { useAuth } from '../context/AuthContext';
 import type { StatutSuivi, Suivi, ClientPrime, Prime } from '../services/dataService';
 import { createSuivi, updateSuivi, deleteSuivi, type SuiviInput } from '../services/metierAdminService';
+import { filtrerSuivisParPrime, regrouperSuivisParClient } from '../lib/suivisView';
 
 const COLONNES: { statut: StatutSuivi; titre: string }[] = [
   { statut: 'a_faire', titre: 'À faire' },
@@ -38,14 +39,22 @@ function champs(clients: ClientPrime[], primes: Prime[]): ChampDef[] {
 }
 
 export default function Suivis() {
-  const [vue, setVue] = useState<'tableau' | 'liste'>('tableau');
+  const [vue, setVue] = useState<'clients' | 'tableau' | 'liste'>('clients');
+  const [filtrePrime, setFiltrePrime] = useState('tous');
   const { suivis, clients, primes, loading, error, reload } = useMetier();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const suivisAffiches = filtrerSuivisParPrime(suivis, clients, filtrePrime, isAdmin);
+  const groupesClients = regrouperSuivisParClient(suivisAffiches, clients);
 
   const [form, setForm] = useState<Record<string, unknown> | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
   const [suppr, setSuppr] = useState<Suivi | null>(null);
+
+  const primeDuSuivi = (suivi: Suivi) => {
+    const client = clients.find((c) => c.id === suivi.clientId);
+    return primes.find((p) => p.id === (client ? client.primeId : suivi.primeId));
+  };
 
   const ouvrirAjout = () => { setEditId(null); setForm({ titre: '', clientId: '', primeId: '', statut: 'a_faire', echeance: '', note: '' }); };
   const ouvrirEdition = (s: Suivi) => {
@@ -91,26 +100,36 @@ export default function Suivis() {
     <Page>
       <PageHeader
         titre="Suivis"
-        sousTitre="Tâches et dossiers en cours par client, façon tableau d’opérations."
-        action={
-          <div className="flex items-center gap-2">
-            {isAdmin && (
-              <button onClick={ouvrirAjout}
-                className="inline-flex items-center gap-2 rounded-xl bg-bz-blue px-3.5 py-2 text-sm font-semibold text-white hover:bg-bz-blue2">
-                <Plus className="h-4 w-4" /> Ajouter
-              </button>
-            )}
-            <div className="flex rounded-xl border border-white/10 bg-white/5 p-0.5 text-xs font-medium">
-              {(['tableau', 'liste'] as const).map((v) => (
-                <button key={v} onClick={() => setVue(v)}
-                  className={`rounded-lg px-3 py-1.5 capitalize transition-colors ${vue === v ? 'bg-bz-blue/25 text-white' : 'text-slate-400 hover:text-white'}`}>
-                  {v}
-                </button>
-              ))}
-            </div>
-          </div>
-        }
+        sousTitre="Tâches et dossiers regroupés par client, avec les vues Tableau et Liste."
+        action={isAdmin && (
+          <button onClick={ouvrirAjout}
+            className="inline-flex items-center gap-2 rounded-xl bg-bz-blue px-3.5 py-2 text-sm font-semibold text-white hover:bg-bz-blue2">
+            <Plus className="h-4 w-4" /> Ajouter
+          </button>
+        )}
       />
+
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div role="group" aria-label="Vue des suivis" className="flex rounded-xl border border-white/10 bg-white/5 p-0.5 text-xs font-medium">
+          {(['clients', 'tableau', 'liste'] as const).map((v) => (
+            <button key={v} onClick={() => setVue(v)} aria-pressed={vue === v}
+              className={`rounded-lg px-3 py-1.5 capitalize transition-colors ${vue === v ? 'bg-bz-blue/25 text-white' : 'text-slate-400 hover:text-white'}`}>
+              {v}
+            </button>
+          ))}
+        </div>
+        {isAdmin && (
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            Filtrer par Prime
+            <select aria-label="Filtrer par Prime" value={filtrePrime} onChange={(e) => setFiltrePrime(e.target.value)}
+              className="rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-sm text-white">
+              <option value="tous">Tous les Primes</option>
+              {primes.map((p) => <option key={p.id} value={String(p.id)}>{p.nom} · {p.codeTitan}</option>)}
+              <option value="sans">Sans Prime</option>
+            </select>
+          </label>
+        )}
+      </div>
 
       {loading && (
         <div className="flex items-center gap-2 px-1 py-8 text-sm text-slate-400">
@@ -119,10 +138,46 @@ export default function Suivis() {
       )}
       {error && <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">{error}</div>}
 
-      {!loading && !error && (vue === 'tableau' ? (
+      {!loading && !error && suivisAffiches.length === 0 && (
+        <Card className="text-sm text-slate-400">Aucun suivi pour ce filtre.</Card>
+      )}
+
+      {!loading && !error && suivisAffiches.length > 0 && (vue === 'clients' ? (
+        <div className="space-y-6">
+          {groupesClients.map((groupe) => {
+            const client = clients.find((c) => c.id === groupe.clientId);
+            const prime = client ? primes.find((p) => p.id === client.primeId) : null;
+            return (
+              <section key={groupe.clientId ?? 'sans-client'} aria-label={`Suivis de ${groupe.nom}`}>
+                <div className="mb-3 flex flex-wrap items-center gap-3 border-b border-white/10 pb-2">
+                  <h2 className="text-lg font-bold text-white">{groupe.nom}</h2>
+                  <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs text-slate-300">{groupe.suivis.length} suivi(s)</span>
+                  {prime && <span className="text-xs text-titan-cyan">{prime.codeTitan}</span>}
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {groupe.suivis.map((s) => (
+                    <Card key={s.id} className="p-3.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="text-sm font-medium text-white">{s.titre}</div>
+                        <BoutonsAdmin s={s} />
+                      </div>
+                      {s.note && <div className="mt-1.5 text-[11px] italic text-slate-500">{s.note}</div>}
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <SuiviBadge statut={s.statut} />
+                        <span className="text-xs text-slate-400">Échéance {s.echeance ?? '—'}</span>
+                        {!client && <span className="text-xs text-titan-cyan">{primeDuSuivi(s)?.codeTitan}</span>}
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      ) : vue === 'tableau' ? (
         <div className="grid gap-4 md:grid-cols-4">
           {COLONNES.map((col) => {
-            const items = suivis.filter((s) => s.statut === col.statut);
+            const items = suivisAffiches.filter((s) => s.statut === col.statut);
             return (
               <div key={col.statut}>
                 <div className="mb-2 flex items-center justify-between px-1">
@@ -132,7 +187,7 @@ export default function Suivis() {
                 <div className="space-y-2">
                   {items.map((s) => {
                     const client = clients.find((c) => c.id === s.clientId);
-                    const prime = primes.find((p) => p.id === s.primeId);
+                    const prime = primeDuSuivi(s);
                     return (
                       <Card key={s.id} className="p-3.5">
                         <div className="flex items-start justify-between gap-2">
@@ -156,7 +211,7 @@ export default function Suivis() {
       ) : (
         <Card className="p-0">
           <ul className="divide-y divide-white/5">
-            {suivis.map((s) => {
+            {suivisAffiches.map((s) => {
               const client = clients.find((c) => c.id === s.clientId);
               return (
                 <li key={s.id} className="flex items-center justify-between px-5 py-3.5">
