@@ -1,5 +1,5 @@
 // Service d'administration des données métier — PRIsME Prime (admin seulement côté serveur).
-import type { Prime, ClientPrime, Suivi } from './dataService';
+import type { Prime, ClientPrime } from './dataService';
 
 async function parseJson(r: Response) {
   const t = await r.text();
@@ -41,19 +41,4 @@ export async function createClient(input: ClientInput): Promise<ClientPrime> {
 }
 export async function updateClient(id: number, input: ClientInput, expected: Pick<ClientPrime, 'primeId' | 'servoClientId'>): Promise<ClientPrime> {
   return (await send<{ client: ClientPrime }>('PUT', `/api/clients/${id}`, { client: input, expected })).client;
-}
-export async function deleteClient(id: number): Promise<void> {
-  await send('DELETE', `/api/clients/${id}`);
-}
-
-// ---- Suivis ----
-export type SuiviInput = Omit<Suivi, 'id'>;
-export async function createSuivi(input: SuiviInput): Promise<Suivi> {
-  return (await send<{ suivi: Suivi }>('POST', '/api/suivis', input)).suivi;
-}
-export async function updateSuivi(id: number, input: SuiviInput): Promise<Suivi> {
-  return (await send<{ suivi: Suivi }>('PUT', `/api/suivis/${id}`, input)).suivi;
-}
-export async function deleteSuivi(id: number): Promise<void> {
-  await send('DELETE', `/api/suivis/${id}`);
 }

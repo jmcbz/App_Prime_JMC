@@ -11,7 +11,11 @@ const CORE = {
   suivis: ['id', 'client_id', 'prime_id', 'created_at'],
 };
 const LEGACY_REQUIRED = { primes: 'nom', clients: 'nom', suivis: 'titre' };
-const OWNED_TABLES = new Set(['users', 'user_mfa', 'prime_user_links', ...Object.keys(TABLES)]);
+const BOARD_COLUMNS = {
+  tableaux_suivi: ['id', 'client_id', 'created_at', 'archived_at'],
+  tableau_rubriques: ['tableau_id', 'key', 'statut', 'date', 'note', 'prochaine_action', 'version'],
+};
+const OWNED_TABLES = new Set(['users', 'user_mfa', 'prime_user_links', ...Object.keys(BOARD_COLUMNS), ...Object.keys(TABLES)]);
 const USER_COLUMNS = {
   users: ['id', 'email', 'password_hash', 'prenom', 'nom', 'role', 'is_active', 'created_at'],
   user_mfa: ['user_id', 'secret_encrypted', 'mfa_enabled', 'pending_setup', 'enabled_at', 'created_at', 'updated_at'],
@@ -24,6 +28,8 @@ const PG_TYPES = {
   primes: { id: 'int4', created_at: 'timestamp', specialites: 'jsonb' },
   clients: { id: 'int4', prime_id: 'int4', created_at: 'timestamp' },
   suivis: { id: 'int4', client_id: 'int4', prime_id: 'int4', created_at: 'timestamp' },
+  tableaux_suivi: { id: 'int4', client_id: 'int4', created_at: 'timestamp', archived_at: 'timestamp' },
+  tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', version: 'text' },
 };
 const PG_FOREIGN_KEYS = [
   ['user_mfa', 'user_id', 'users', 'id', 'CASCADE'],
@@ -32,6 +38,8 @@ const PG_FOREIGN_KEYS = [
   ['clients', 'prime_id', 'primes', 'id', 'SET NULL'],
   ['suivis', 'client_id', 'clients', 'id', 'CASCADE'],
   ['suivis', 'prime_id', 'primes', 'id', 'SET NULL'],
+  ['tableaux_suivi', 'client_id', 'clients', 'id', 'CASCADE'],
+  ['tableau_rubriques', 'tableau_id', 'tableaux_suivi', 'id', 'CASCADE'],
 ];
 const SQLITE_TYPES = {
   users: { id: 'INTEGER', email: 'TEXT', password_hash: 'TEXT', is_active: 'INTEGER' },
@@ -40,6 +48,8 @@ const SQLITE_TYPES = {
   primes: { id: 'INTEGER', created_at: 'TEXT', specialites: 'TEXT' },
   clients: { id: 'INTEGER', prime_id: 'INTEGER', created_at: 'TEXT' },
   suivis: { id: 'INTEGER', client_id: 'INTEGER', prime_id: 'INTEGER', created_at: 'TEXT' },
+  tableaux_suivi: { id: 'INTEGER', client_id: 'INTEGER', created_at: 'TEXT', archived_at: 'TEXT' },
+  tableau_rubriques: { tableau_id: 'INTEGER', key: 'TEXT', statut: 'TEXT', date: 'TEXT', note: 'TEXT', prochaine_action: 'TEXT', version: 'TEXT' },
 };
 
 function inspect(table, columns, type = 'pg') {
@@ -89,13 +99,16 @@ export async function checkPgMetierIdentity(pool) {
       throw new Error('Schéma App Prime incomplet: tables attendues absentes');
     }
   }
+  if (names.has('tableaux_suivi') !== names.has('tableau_rubriques')) {
+    throw new Error('Schéma étranger à App Prime: tables de suivi incomplètes');
+  }
   const found = await pgColumns(pool);
   for (const table of Object.keys(TABLES)) inspect(table, found[table]);
   if (names.size) {
     const userColumns = await pool.query(
       `SELECT table_name, column_name, udt_name FROM information_schema.columns
        WHERE table_schema = current_schema() AND table_name = ANY($1::text[])`,
-      [Object.keys(USER_COLUMNS)],
+      [Object.keys(USER_COLUMNS).concat(Object.keys(BOARD_COLUMNS))],
     );
     const allColumns = { ...found };
     for (const table of Object.keys(USER_COLUMNS)) {
@@ -106,7 +119,16 @@ export async function checkPgMetierIdentity(pool) {
         throw new Error(`Schéma étranger à App Prime: ${table} incompatible`);
       }
     }
+    for (const [table, required] of Object.entries(BOARD_COLUMNS)) {
+      if (!names.has(table)) continue;
+      allColumns[table] = new Map(userColumns.rows.filter(row => row.table_name === table)
+        .map(row => [row.column_name, row.udt_name]));
+      if (required.some(column => !allColumns[table].has(column))) {
+        throw new Error(`Schéma étranger à App Prime: ${table} incompatible`);
+      }
+    }
     for (const [table, expected] of Object.entries(PG_TYPES)) {
+      if (!names.has(table) && BOARD_COLUMNS[table]) continue;
       const actual = allColumns[table];
       for (const [column, type] of Object.entries(expected)) {
         if (actual.has(column) && actual.get(column) !== type) {
@@ -128,6 +150,17 @@ export async function checkPgMetierIdentity(pool) {
        WHERE tc.table_schema = current_schema() AND tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY','UNIQUE')`,
     );
     for (const table of names) {
+      if (table === 'tableau_rubriques') {
+        const groups = new Map();
+        for (const row of keys.rows.filter(row => row.table_name === table && row.constraint_type === 'PRIMARY KEY')) {
+          if (!groups.has(row.constraint_name)) groups.set(row.constraint_name, []);
+          groups.get(row.constraint_name).push(row.column_name);
+        }
+        if (![...groups.values()].some(columns => new Set(columns).size === 2 && columns.includes('tableau_id') && columns.includes('key'))) {
+          throw new Error('Schéma étranger à App Prime: clé primaire tableau_rubriques(tableau_id,key) absente');
+        }
+        continue;
+      }
       const key = table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
       if (!keys.rows.some(row => row.table_name === table && row.constraint_type === 'PRIMARY KEY' && row.column_name === key)) {
         throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${key} absente`);
@@ -246,13 +279,25 @@ export function checkSqliteMetierIdentity(sqlite) {
       }
     }
   }
+  if (names.has('tableaux_suivi') !== names.has('tableau_rubriques')) {
+    throw new Error('Schéma étranger à App Prime: tables de suivi incomplètes');
+  }
   for (const table of Object.keys(TABLES)) inspect(table, sqliteColumns(sqlite, table), 'sqlite');
   for (const table of names) {
     const rows = sqlite.prepare(`PRAGMA table_info(${table})`).all();
     const columns = new Map(rows.map(row => [row.name, row]));
-    const primaryKey = table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
-    if (rows.filter(row => row.pk).length !== 1 || columns.get(primaryKey)?.pk !== 1) {
-      throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${primaryKey} incompatible`);
+    if (BOARD_COLUMNS[table] && BOARD_COLUMNS[table].some(column => !columns.has(column))) {
+      throw new Error(`Schéma étranger à App Prime: ${table} incompatible`);
+    }
+    if (table === 'tableau_rubriques') {
+      if (columns.get('tableau_id')?.pk !== 1 || columns.get('key')?.pk !== 2 || rows.filter(row => row.pk).length !== 2) {
+        throw new Error('Schéma étranger à App Prime: clé primaire tableau_rubriques(tableau_id,key) incompatible');
+      }
+    } else {
+      const primaryKey = table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
+      if (rows.filter(row => row.pk).length !== 1 || columns.get(primaryKey)?.pk !== 1) {
+        throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${primaryKey} incompatible`);
+      }
     }
     if (table === 'prime_user_links') {
       if (columns.get('prime_id')?.notnull !== 1) {

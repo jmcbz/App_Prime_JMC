@@ -50,12 +50,11 @@ test('les routes authentifiées isolent les usagers standards sans limiter les a
     const ac=await call('POST','/api/clients',adminToken,{nom:'A privé',primeId:a.prime.id,statut:'actif'});
     const bc=await call('POST','/api/clients',adminToken,{nom:'B privé',primeId:b.prime.id,statut:'actif'});
     assert.equal(ac.status,201);assert.equal(bc.status,201);
-    const as=await call('POST','/api/suivis',adminToken,{titre:'Suivi A',primeId:a.prime.id,clientId:ac.data.client.id});
-    const bs=await call('POST','/api/suivis',adminToken,{titre:'Suivi B',primeId:b.prime.id,clientId:bc.data.client.id});
-    assert.equal(as.status,201);assert.equal(bs.status,201);
+    const as=await db.createSuivi({titre:'Suivi A',primeId:a.prime.id,clientId:ac.data.client.id});
+    const bs=await db.createSuivi({titre:'Suivi B',primeId:b.prime.id,clientId:bc.data.client.id});
     const aToken=await issue(db,auth,await db.getUserById(a.user.id));
     const bToken=await issue(db,auth,await db.getUserById(b.user.id));
-    for(const [token,primeId,clientId,suiviId] of [[aToken,a.prime.id,ac.data.client.id,as.data.suivi.id],[bToken,b.prime.id,bc.data.client.id,bs.data.suivi.id]]){
+    for(const [token,primeId,clientId,suiviId] of [[aToken,a.prime.id,ac.data.client.id,as.id],[bToken,b.prime.id,bc.data.client.id,bs.id]]){
       const pp=await call('GET','/api/primes',token),cc=await call('GET','/api/clients',token),ss=await call('GET','/api/suivis',token);
       assert.equal(pp.status,200);assert.equal(cc.status,200);assert.equal(ss.status,200);
       assert.deepEqual(pp.data.primes.map(x=>x.id),[primeId]);
@@ -86,8 +85,8 @@ test('les routes authentifiées isolent les usagers standards sans limiter les a
     });
     assert.equal(transfer.status,200);
     assert.equal((await call('GET','/api/clients',aToken)).data.clients.some(x=>x.id===ac.data.client.id),false);
-    assert.equal((await call('GET','/api/suivis',aToken)).data.suivis.some(x=>x.id===as.data.suivi.id),false);
+    assert.equal((await call('GET','/api/suivis',aToken)).data.suivis.some(x=>x.id===as.id),false);
     assert.equal((await call('GET','/api/clients',bToken)).data.clients.some(x=>x.id===ac.data.client.id),true);
-    assert.equal((await call('GET','/api/suivis',bToken)).data.suivis.some(x=>x.id===as.data.suivi.id),true);
+    assert.equal((await call('GET','/api/suivis',bToken)).data.suivis.some(x=>x.id===as.id),true);
   } finally {child.kill();await new Promise(resolve=>child.once('exit',resolve));fs.rmSync(dir,{recursive:true,force:true});}
 });

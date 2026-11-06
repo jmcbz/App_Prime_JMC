@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier } from './metier-migration.js';
 import { applyPrimePortfolio } from './prime-portfolio.js';
+import { backfillTableaux, createInitialTableauSqlite, createTableauForClient, listTableaux as listTableauxRows, updateRubrique as updateRubriqueRow } from './tableaux-suivi.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USE_PG = Boolean(process.env.DATABASE_URL);
@@ -32,8 +33,10 @@ export async function initDb() {
       const legacyColumns = await migratePgMetier(pool, createSchemaPg);
       await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_servo_id ON clients ((data->>'servoClientId')) WHERE data ? 'servoClientId'");
       driver = { kind: 'pg', pool, legacyColumns };
+      await backfillTableaux(driver);
       console.log('✅ Base de données PostgreSQL initialisée');
     } catch (error) {
+      driver = null;
       await pool.end();
       throw error;
     }
@@ -65,8 +68,10 @@ export async function initDb() {
       }).immediate();
       sqlite.pragma('journal_mode = WAL');
       driver = { kind: 'sqlite', sqlite, legacyColumns };
+      await backfillTableaux(driver);
       console.log(`✅ Base de données SQLite initialisée (${dbPath})`);
     } catch (error) {
+      driver = null;
       sqlite.close();
       throw error;
     }
@@ -122,6 +127,23 @@ function createSchemaSqlite(sqlite) {
     );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
+    CREATE TABLE IF NOT EXISTS tableaux_suivi (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      archived_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tableaux_active_client ON tableaux_suivi(client_id) WHERE archived_at IS NULL;
+    CREATE TABLE IF NOT EXISTS tableau_rubriques (
+      tableau_id INTEGER NOT NULL REFERENCES tableaux_suivi(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      statut TEXT NOT NULL DEFAULT 'a_faire',
+      date TEXT,
+      note TEXT NOT NULL DEFAULT '',
+      prochaine_action TEXT NOT NULL DEFAULT '',
+      version TEXT,
+      PRIMARY KEY (tableau_id, key)
+    );
   `);
 }
 
@@ -173,6 +195,23 @@ async function createSchemaPg(pool) {
     );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
+    CREATE TABLE IF NOT EXISTS tableaux_suivi (
+      id SERIAL PRIMARY KEY,
+      client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      archived_at TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tableaux_active_client ON tableaux_suivi(client_id) WHERE archived_at IS NULL;
+    CREATE TABLE IF NOT EXISTS tableau_rubriques (
+      tableau_id INTEGER NOT NULL REFERENCES tableaux_suivi(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      statut TEXT NOT NULL DEFAULT 'a_faire',
+      date TEXT,
+      note TEXT NOT NULL DEFAULT '',
+      prochaine_action TEXT NOT NULL DEFAULT '',
+      version TEXT,
+      PRIMARY KEY (tableau_id, key)
+    );
   `);
 }
 
@@ -595,8 +634,27 @@ export async function updatePrimePortfolio(id, prime, changes) {
 }
 
 export async function deletePrime(id) {
-  try { await deleteRow('primes', id); }
-  catch (error) {
+  const retained = () => Object.assign(new Error('Ce Prime possède des anciens suivis qui doivent être conservés'), { statusCode: 409 });
+  try {
+    if (driver.kind === 'sqlite') {
+      return driver.sqlite.transaction(() => {
+        if (driver.sqlite.prepare('SELECT 1 FROM suivis WHERE prime_id = ? LIMIT 1').get(id)) throw retained();
+        driver.sqlite.prepare('DELETE FROM primes WHERE id = ?').run(id);
+      }).immediate();
+    }
+    const tx = await driver.pool.connect();
+    try {
+      await tx.query('BEGIN');
+      const present = (await tx.query('SELECT id FROM primes WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      if (present) {
+        const history = await tx.query('SELECT 1 FROM suivis WHERE prime_id = $1 LIMIT 1', [id]);
+        if (history.rowCount) throw retained();
+        await tx.query('DELETE FROM primes WHERE id = $1', [id]);
+      }
+      await tx.query('COMMIT');
+    } catch (error) { await tx.query('ROLLBACK'); throw error; }
+    finally { tx.release(); }
+  } catch (error) {
     if (error.code === '23503' || error.code === 'SQLITE_CONSTRAINT_FOREIGNKEY'
       || (error.code === 'SQLITE_CONSTRAINT_TRIGGER' && error.message === 'FOREIGN KEY constraint failed')) {
       const conflict = new Error('Ce Prime est relié à un usager et ne peut pas être supprimé');
@@ -642,7 +700,36 @@ export async function listClientsForUser(userId) {
 }
 
 export async function createClient(input, connection = null) {
-  return normalizeClient(await insertJsonRow('clients', clientData(input), { prime_id: input.primeId ?? null }, connection));
+  if (driver.kind === 'pg') {
+    if (connection) {
+      const client = normalizeClient(await insertJsonRow('clients', clientData(input), { prime_id: input.primeId ?? null }, connection));
+      await createTableauForClient(driver, client.id, connection);
+      return client;
+    }
+    const tx = await driver.pool.connect();
+    try {
+      await tx.query('BEGIN');
+      const client = await createClient(input, tx);
+      await tx.query('COMMIT');
+      return client;
+    } catch (error) { await tx.query('ROLLBACK'); throw error; }
+    finally { tx.release(); }
+  }
+  return driver.sqlite.transaction(() => {
+    const data = clientData(input);
+    const fields = { prime_id: input.primeId ?? null, data: JSON.stringify(data), ...legacyValues('clients', data) };
+    const columns = Object.keys(fields);
+    const row = driver.sqlite.prepare(`INSERT INTO clients (${columns.join(',')}, updated_at) VALUES (${columns.map(() => '?').join(',')}, datetime('now')) RETURNING *`)
+      .get(...Object.values(fields));
+    createInitialTableauSqlite(driver, row.id);
+    return normalizeClient(row);
+  }).immediate();
+}
+
+export async function listTableaux(userId, admin) { return listTableauxRows(driver, userId, admin); }
+export async function createTableau(clientId, userId, admin, expectedActiveId) { return createTableauForClient(driver, clientId, null, userId, admin, expectedActiveId); }
+export async function updateTableauRubrique(id, key, input, userId, admin) {
+  return updateRubriqueRow(driver, id, key, input, userId, admin);
 }
 
 export async function updateClient(id, input, expected) {
@@ -665,10 +752,6 @@ export async function updateClient(id, input, expected) {
       const keys = Object.keys(fields);
       driver.sqlite.prepare(`UPDATE clients SET ${keys.map((key) => `${key} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
         .run(...Object.values(fields), id);
-      if (row.prime_id !== (input.primeId ?? null)) {
-        driver.sqlite.prepare("UPDATE suivis SET prime_id = ?, updated_at = datetime('now') WHERE client_id = ?")
-          .run(input.primeId ?? null, id);
-      }
       return normalizeClient(driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(id));
     }).immediate();
   }
@@ -681,9 +764,6 @@ export async function updateClient(id, input, expected) {
     const fields = update(row);
     const keys = Object.keys(fields), values = Object.values(fields);
     const updated = (await connection.query(`UPDATE clients SET ${keys.map((key, i) => `${key} = $${i + 1}${key === 'data' ? '::jsonb' : ''}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${keys.length + 1} RETURNING *`, [...values, id])).rows[0];
-    if (row.prime_id !== (input.primeId ?? null)) {
-      await connection.query('UPDATE suivis SET prime_id = $1, updated_at = CURRENT_TIMESTAMP WHERE client_id = $2', [input.primeId ?? null, id]);
-    }
     await connection.query('COMMIT');
     return normalizeClient(updated);
   } catch (error) {
@@ -693,7 +773,28 @@ export async function updateClient(id, input, expected) {
 }
 
 export async function deleteClient(id) {
-  await deleteRow('clients', id);
+  const retained = () => Object.assign(new Error('Client non supprimable : ses tableaux et anciens suivis doivent être conservés. Retirez plutôt son attribution au Prime.'), { statusCode: 409 });
+  if (driver.kind === 'sqlite') {
+    return driver.sqlite.transaction(() => {
+      const present = driver.sqlite.prepare('SELECT 1 FROM clients WHERE id = ?').get(id);
+      if (!present) return;
+      const history = driver.sqlite.prepare('SELECT 1 FROM tableaux_suivi WHERE client_id = ? UNION SELECT 1 FROM suivis WHERE client_id = ? LIMIT 1').get(id,id);
+      if (history) throw retained();
+      driver.sqlite.prepare('DELETE FROM clients WHERE id = ?').run(id);
+    }).immediate();
+  }
+  const tx = await driver.pool.connect();
+  try {
+    await tx.query('BEGIN');
+    const present = (await tx.query('SELECT id FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
+    if (present) {
+      const history = await tx.query('SELECT 1 FROM tableaux_suivi WHERE client_id = $1 UNION SELECT 1 FROM suivis WHERE client_id = $1 LIMIT 1', [id]);
+      if (history.rowCount) throw retained();
+      await tx.query('DELETE FROM clients WHERE id = $1', [id]);
+    }
+    await tx.query('COMMIT');
+  } catch (error) { await tx.query('ROLLBACK'); throw error; }
+  finally { tx.release(); }
 }
 
 // ---------- Suivis ----------

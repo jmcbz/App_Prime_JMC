@@ -51,9 +51,18 @@ test('les suivis sont regroupés par client, les sans-client à la fin, et trié
   assert.deepEqual(groups.map((g) => g.suivis.map((s) => s.id)), [[6, 2], [4], [1], [3, 5]]);
 });
 
-test('la page ouvre la vue Clients et n’offre le filtre Prime qu’aux admins', () => {
+test('le tableau de bord nomme explicitement ses compteurs et sa liste historiques', () => {
+  const source = fs.readFileSync(new URL('../src/pages/Dashboard.tsx', import.meta.url), 'utf8');
+  assert.match(source, /Suivis en cours \(anciens\)/);
+  assert.match(source, /Points bloqués \(anciens\)/);
+  assert.match(source, /Anciens suivis prioritaires/);
+});
+
+test('la page ouvre un tableau par client, filtre le Prime côté admin et sépare les anciens suivis', () => {
   const source = fs.readFileSync(new URL('../src/pages/Suivis.tsx', import.meta.url), 'utf8');
-  assert.match(source, /useState<[^>]*'clients'[^>]*>\('clients'\)/);
-  assert.match(source, /\{isAdmin\s*&&\s*\(\s*<label[\s\S]*?Filtrer par Prime/);
-  assert.match(source, /filtrerSuivisParPrime\(suivis, clients, filtrePrime, isAdmin\)/);
+  assert.match(source, /const \[selectedId, setSelectedId\] = useState<number \| null>\(null\)/);
+  assert.match(source, /\{isAdmin\s*&&\s*<label[\s\S]*?Filtrer par Prime/);
+  assert.match(source, /clientsPourPrime\(clients, filtrePrime, isAdmin\)/);
+  assert.match(source, /<SuivisBoard key=\{active\.id\}/);
+  assert.match(source, /aria-label="Anciens suivis"/);
 });

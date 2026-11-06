@@ -1,253 +1,151 @@
-import { useState } from 'react';
-import { Loader2, Plus, Pencil, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Loader2, Plus } from 'lucide-react';
 import { Page, PageHeader } from '../layout/Page';
-import { Card, SuiviBadge, ConfirmDialog } from '../components/ui';
-import EntityFormModal, { type ChampDef } from '../components/EntityFormModal';
+import { Card, SuiviBadge } from '../components/ui';
 import { useMetier } from '../hooks/useMetier';
 import { useAuth } from '../context/AuthContext';
-import type { StatutSuivi, Suivi, ClientPrime, Prime } from '../services/dataService';
-import { createSuivi, updateSuivi, deleteSuivi, type SuiviInput } from '../services/metierAdminService';
-import { filtrerSuivisParPrime, regrouperSuivisParClient } from '../lib/suivisView';
+import { clientsPourPrime, tableauxDuClient, anciensSuivisDuClient } from '../lib/tableauxSuiviView';
+import { createTableauSuivi, fetchTableauxSuivi, updateRubriqueSuivi,
+  type TableauSuivi, type RubriqueKey, type RubriqueInput } from '../services/tableauxSuiviService';
+import type { Suivi } from '../services/dataService';
+import SuivisBoard from './SuivisBoard';
 
-const COLONNES: { statut: StatutSuivi; titre: string }[] = [
-  { statut: 'a_faire', titre: 'À faire' },
-  { statut: 'en_cours', titre: 'En cours' },
-  { statut: 'bloque', titre: 'Bloqué' },
-  { statut: 'termine', titre: 'Terminé' },
-];
-
-function champs(clients: ClientPrime[], primes: Prime[]): ChampDef[] {
-  return [
-    { nom: 'titre', label: 'Titre', type: 'text', requis: true },
-    { nom: 'clientId', label: 'Client', type: 'select', options: [
-      { value: '', label: '— Aucun —' },
-      ...clients.map((c) => ({ value: String(c.id), label: c.nom })),
-    ] },
-    { nom: 'primeId', label: 'Prime responsable', type: 'select', options: [
-      { value: '', label: '— Aucun —' },
-      ...primes.map((p) => ({ value: String(p.id), label: `${p.nom} · ${p.codeTitan}` })),
-    ] },
-    { nom: 'statut', label: 'Statut', type: 'select', options: [
-      { value: 'a_faire', label: 'À faire' },
-      { value: 'en_cours', label: 'En cours' },
-      { value: 'bloque', label: 'Bloqué' },
-      { value: 'termine', label: 'Terminé' },
-    ] },
-    { nom: 'echeance', label: 'Échéance', type: 'date' },
-    { nom: 'note', label: 'Note', type: 'textarea' },
-  ];
+function AnciensSuivis({ suivis, titre }: { suivis: Suivi[]; titre: string }) {
+  return <section className="mt-5">
+    <h3 className="mb-2 text-sm font-semibold text-slate-300">{titre}</h3>
+    {suivis.length === 0 ? <p className="text-sm text-slate-500">Aucun ancien suivi.</p> :
+      <ul className="space-y-2">{suivis.map(s => <li key={s.id}>
+        <Card className="p-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium text-white">{s.titre}</span><SuiviBadge statut={s.statut} /></div>
+          <p className="mt-1 text-xs text-slate-400">Échéance : {s.echeance || '—'}</p>
+          {s.note && <p className="mt-1 whitespace-pre-wrap text-xs text-slate-300">{s.note}</p>}
+        </Card>
+      </li>)}</ul>}
+  </section>;
 }
 
 export default function Suivis() {
-  const [vue, setVue] = useState<'clients' | 'tableau' | 'liste'>('clients');
-  const [filtrePrime, setFiltrePrime] = useState('tous');
-  const { suivis, clients, primes, loading, error, reload } = useMetier();
+  const { suivis, clients, primes, loading, error } = useMetier();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
-  const suivisAffiches = filtrerSuivisParPrime(suivis, clients, filtrePrime, isAdmin);
-  const groupesClients = regrouperSuivisParClient(suivisAffiches, clients);
+  const [filtrePrime, setFiltrePrime] = useState('tous');
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [tableaux, setTableaux] = useState<TableauSuivi[]>([]);
+  const [boardsLoading, setBoardsLoading] = useState(true);
+  const [boardError, setBoardError] = useState('');
+  const [showArchives, setShowArchives] = useState(false);
+  const [confirmNew, setConfirmNew] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [creationUncertain, setCreationUncertain] = useState(false);
 
-  const [form, setForm] = useState<Record<string, unknown> | null>(null);
-  const [editId, setEditId] = useState<number | null>(null);
-  const [suppr, setSuppr] = useState<Suivi | null>(null);
+  async function refreshBoards() {
+    const list = await fetchTableauxSuivi();
+    setTableaux(list);
+    setBoardError('');
+  }
+  async function retryBoards() {
+    setBoardsLoading(true);
+    try { await refreshBoards(); setCreationUncertain(false); }
+    catch (e) { setBoardError(e instanceof Error ? e.message : 'Erreur de synchronisation des tableaux'); }
+    finally { setBoardsLoading(false); }
+  }
+  useEffect(() => {
+    let cancelled = false;
+    fetchTableauxSuivi().then(list => { if (!cancelled) setTableaux(list); })
+      .catch(e => { if (!cancelled) setBoardError(e instanceof Error ? e.message : 'Erreur de chargement des tableaux'); })
+      .finally(() => { if (!cancelled) setBoardsLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
-  const primeDuSuivi = (suivi: Suivi) => {
-    const client = clients.find((c) => c.id === suivi.clientId);
-    return primes.find((p) => p.id === (client ? client.primeId : suivi.primeId));
-  };
+  const visibleClients = clientsPourPrime(clients, filtrePrime, isAdmin);
+  const clientId = visibleClients.some(c => c.id === selectedId) ? selectedId : visibleClients[0]?.id ?? null;
+  const client = visibleClients.find(c => c.id === clientId);
+  const clientBoards = clientId === null ? [] : tableauxDuClient(tableaux, clientId);
+  const active = clientBoards.find(t => t.archivedAt === null);
+  const archives = clientBoards.filter(t => t.archivedAt !== null);
+  const anciensClient = anciensSuivisDuClient(suivis, clients, clientId, filtrePrime, isAdmin);
+  const sansClient = anciensSuivisDuClient(suivis, clients, null, filtrePrime, isAdmin);
 
-  const ouvrirAjout = () => { setEditId(null); setForm({ titre: '', clientId: '', primeId: '', statut: 'a_faire', echeance: '', note: '' }); };
-  const ouvrirEdition = (s: Suivi) => {
-    setEditId(s.id);
-    setForm({
-      titre: s.titre, clientId: s.clientId == null ? '' : String(s.clientId),
-      primeId: s.primeId == null ? '' : String(s.primeId), statut: s.statut,
-      echeance: s.echeance ?? '', note: s.note ?? '',
-    });
-  };
-
-  async function soumettre() {
-    const f = form ?? {};
-    const payload: SuiviInput = {
-      titre: String(f.titre ?? ''),
-      clientId: f.clientId ? Number(f.clientId) : null,
-      primeId: f.primeId ? Number(f.primeId) : null,
-      statut: (f.statut as StatutSuivi) || 'a_faire',
-      echeance: f.echeance ? String(f.echeance) : null,
-      note: f.note ? String(f.note) : null,
-    };
-    if (editId) await updateSuivi(editId, payload); else await createSuivi(payload);
-    setForm(null); setEditId(null); reload();
+  async function createBoard() {
+    if (clientId === null) return;
+    setCreating(true); setBoardError('');
+    try {
+      const created = await createTableauSuivi(clientId, active?.id ?? null);
+      setTableaux(previous => [
+        ...previous.map(t => t.clientId === clientId && t.archivedAt === null
+          ? { ...t, archivedAt: created.createdAt } : t),
+        created,
+      ]);
+      setShowArchives(false); setConfirmNew(false); setCreationUncertain(false);
+      try { await refreshBoards(); }
+      catch (e) { setBoardError(`Nouveau tableau créé; synchronisation indisponible. ${e instanceof Error ? e.message : 'Réessayez le chargement.'}`); }
+    } catch (e) {
+      setConfirmNew(false);
+      setCreationUncertain(true);
+      setBoardError(`Résultat de création incertain. Synchronisez les tableaux avant toute autre création. ${e instanceof Error ? e.message : ''}`);
+    }
+    finally { setCreating(false); }
+  }
+  async function saveRubrique(tableauId: number, key: RubriqueKey, input: RubriqueInput) {
+    const updated = await updateRubriqueSuivi(tableauId, key, input);
+    setTableaux(previous => previous.map(t => t.id === updated.id ? updated : t));
   }
 
-  function BoutonsAdmin({ s }: { s: Suivi }) {
-    if (!isAdmin) return null;
-    return (
-      <div className="flex gap-1">
-        <button onClick={() => ouvrirEdition(s)} title="Modifier"
-          className="rounded-lg border border-white/10 bg-white/5 p-1.5 text-slate-300 hover:text-white">
-          <Pencil className="h-3.5 w-3.5" />
-        </button>
-        <button onClick={() => setSuppr(s)} title="Supprimer"
-          className="rounded-lg border border-red-500/30 bg-red-500/10 p-1.5 text-red-400 hover:bg-red-500/20">
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <Page>
-      <PageHeader
-        titre="Suivis"
-        sousTitre="Tâches et dossiers regroupés par client, avec les vues Tableau et Liste."
-        action={isAdmin && (
-          <button onClick={ouvrirAjout}
-            className="inline-flex items-center gap-2 rounded-xl bg-bz-blue px-3.5 py-2 text-sm font-semibold text-white hover:bg-bz-blue2">
-            <Plus className="h-4 w-4" /> Ajouter
+  return <Page>
+    <PageHeader titre="Suivis" sousTitre="Tableaux de suivi par client et anciens suivis conservés en lecture seule." />
+    {isAdmin && <label className="mb-4 flex items-center gap-2 text-sm text-slate-300">
+      Filtrer par Prime
+      <select aria-label="Filtrer par Prime" value={filtrePrime} onChange={e => { setFiltrePrime(e.target.value); setShowArchives(false); }} className="rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-white">
+        <option value="tous">Tous les Primes</option>
+        {primes.map(p => <option key={p.id} value={String(p.id)}>{p.nom} · {p.codeTitan}</option>)}
+        <option value="sans">Sans Prime</option>
+      </select>
+    </label>}
+    {(loading || boardsLoading) && <div className="flex items-center gap-2 py-6 text-sm text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /> Chargement…</div>}
+    {(error || boardError) && <div role="alert" className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
+      {error || boardError}
+      {boardError && <button type="button" onClick={() => void retryBoards()} className="ml-3 underline">Réessayer la synchronisation</button>}
+    </div>}
+    {!loading && !boardsLoading && !error && <>
+      {visibleClients.length > 0 ? <>
+        <label className="mb-4 block text-sm text-slate-300">Client
+          <select aria-label="Client" value={clientId ?? ''} onChange={e => { setSelectedId(Number(e.target.value)); setShowArchives(false); }} className="mt-1 block w-full max-w-md rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-white">
+            {visibleClients.map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}
+          </select>
+        </label>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
+          <h2 className="text-lg font-bold text-white">{client?.nom}</h2>
+          <button type="button" disabled={creating || creationUncertain || (!!boardError && !active)} onClick={() => active ? setConfirmNew(true) : void createBoard()} className="inline-flex items-center gap-2 rounded-xl bg-bz-blue px-3.5 py-2 text-sm font-semibold text-white hover:bg-bz-blue2 disabled:opacity-50">
+            <Plus className="h-4 w-4" /> {creating ? 'Création…' : 'Nouveau tableau'}
           </button>
-        )}
-      />
-
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <div role="group" aria-label="Vue des suivis" className="flex rounded-xl border border-white/10 bg-white/5 p-0.5 text-xs font-medium">
-          {(['clients', 'tableau', 'liste'] as const).map((v) => (
-            <button key={v} onClick={() => setVue(v)} aria-pressed={vue === v}
-              className={`rounded-lg px-3 py-1.5 capitalize transition-colors ${vue === v ? 'bg-bz-blue/25 text-white' : 'text-slate-400 hover:text-white'}`}>
-              {v}
-            </button>
-          ))}
         </div>
-        {isAdmin && (
-          <label className="flex items-center gap-2 text-sm text-slate-300">
-            Filtrer par Prime
-            <select aria-label="Filtrer par Prime" value={filtrePrime} onChange={(e) => setFiltrePrime(e.target.value)}
-              className="rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-sm text-white">
-              <option value="tous">Tous les Primes</option>
-              {primes.map((p) => <option key={p.id} value={String(p.id)}>{p.nom} · {p.codeTitan}</option>)}
-              <option value="sans">Sans Prime</option>
-            </select>
-          </label>
-        )}
+        {active ? <SuivisBoard key={active.id} tableau={active} onSave={(key, input) => saveRubrique(active.id, key, input)} /> :
+          <Card className="mt-4 text-sm text-slate-400">Aucun tableau courant pour ce client. Créez-en un pour commencer.</Card>}
+        {archives.length > 0 && <section className="mt-6">
+          <button type="button" aria-expanded={showArchives} onClick={() => setShowArchives(v => !v)} className="text-sm font-semibold text-titan-cyan hover:text-white">Historique des tableaux ({archives.length}) {showArchives ? '−' : '+'}</button>
+          {showArchives && archives.map(t => <SuivisBoard key={t.id} tableau={t} onSave={async () => {}} />)}
+        </section>}
+        <section className="mt-7 border-t border-white/10 pt-4" aria-label="Anciens suivis">
+          <h2 className="text-lg font-bold text-white">Anciens suivis</h2>
+          <p className="text-xs text-slate-400">Données historiques en lecture seule, sans conversion ni suppression.</p>
+          <AnciensSuivis titre={`Suivis de ${client?.nom}`} suivis={anciensClient} />
+          {sansClient.length > 0 && <AnciensSuivis titre="Sans client" suivis={sansClient} />}
+        </section>
+      </> : <>
+        <Card className="text-sm text-slate-400">Aucun client pour ce filtre.</Card>
+        <section className="mt-7" aria-label="Anciens suivis"><h2 className="text-lg font-bold text-white">Anciens suivis</h2>
+          {sansClient.length > 0 && <AnciensSuivis titre="Sans client" suivis={sansClient} />}</section>
+      </>}
+    </>}
+    {confirmNew && <div role="dialog" aria-modal="true" aria-labelledby="archive-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-bz-dark2 p-5 shadow-titan">
+        <h2 id="archive-title" className="text-lg font-bold text-white">Archiver le tableau courant ?</h2>
+        <p className="mt-2 text-sm text-slate-300">Le tableau actuel de « {client?.nom} » sera archivé en lecture seule et un nouveau tableau vide sera créé.</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={() => setConfirmNew(false)} className="rounded-xl border border-white/10 px-4 py-2 text-sm text-white">Annuler</button>
+          <button type="button" disabled={creating} onClick={() => void createBoard()} className="rounded-xl bg-bz-blue px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{creating ? 'Création…' : 'Créer et archiver'}</button>
+        </div>
       </div>
-
-      {loading && (
-        <div className="flex items-center gap-2 px-1 py-8 text-sm text-slate-400">
-          <Loader2 className="h-4 w-4 animate-spin" /> Chargement…
-        </div>
-      )}
-      {error && <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">{error}</div>}
-
-      {!loading && !error && suivisAffiches.length === 0 && (
-        <Card className="text-sm text-slate-400">Aucun suivi pour ce filtre.</Card>
-      )}
-
-      {!loading && !error && suivisAffiches.length > 0 && (vue === 'clients' ? (
-        <div className="space-y-6">
-          {groupesClients.map((groupe) => {
-            const client = clients.find((c) => c.id === groupe.clientId);
-            const prime = client ? primes.find((p) => p.id === client.primeId) : null;
-            return (
-              <section key={groupe.clientId ?? 'sans-client'} aria-label={`Suivis de ${groupe.nom}`}>
-                <div className="mb-3 flex flex-wrap items-center gap-3 border-b border-white/10 pb-2">
-                  <h2 className="text-lg font-bold text-white">{groupe.nom}</h2>
-                  <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs text-slate-300">{groupe.suivis.length} suivi(s)</span>
-                  {prime && <span className="text-xs text-titan-cyan">{prime.codeTitan}</span>}
-                </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {groupe.suivis.map((s) => (
-                    <Card key={s.id} className="p-3.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="text-sm font-medium text-white">{s.titre}</div>
-                        <BoutonsAdmin s={s} />
-                      </div>
-                      {s.note && <div className="mt-1.5 text-[11px] italic text-slate-500">{s.note}</div>}
-                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                        <SuiviBadge statut={s.statut} />
-                        <span className="text-xs text-slate-400">Échéance {s.echeance ?? '—'}</span>
-                        {!client && <span className="text-xs text-titan-cyan">{primeDuSuivi(s)?.codeTitan}</span>}
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              </section>
-            );
-          })}
-        </div>
-      ) : vue === 'tableau' ? (
-        <div className="grid gap-4 md:grid-cols-4">
-          {COLONNES.map((col) => {
-            const items = suivisAffiches.filter((s) => s.statut === col.statut);
-            return (
-              <div key={col.statut}>
-                <div className="mb-2 flex items-center justify-between px-1">
-                  <span className="text-xs font-bold uppercase tracking-wide text-slate-300">{col.titre}</span>
-                  <span className="text-xs text-slate-500">{items.length}</span>
-                </div>
-                <div className="space-y-2">
-                  {items.map((s) => {
-                    const client = clients.find((c) => c.id === s.clientId);
-                    const prime = primeDuSuivi(s);
-                    return (
-                      <Card key={s.id} className="p-3.5">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="text-sm font-medium text-white">{s.titre}</div>
-                          <BoutonsAdmin s={s} />
-                        </div>
-                        <div className="mt-1 text-xs text-slate-400">{client?.nom}</div>
-                        {s.note && <div className="mt-1.5 text-[11px] italic text-slate-500">{s.note}</div>}
-                        <div className="mt-2.5 flex items-center justify-between">
-                          <span className="text-[11px] text-titan-cyan">{prime?.codeTitan}</span>
-                          <span className="text-[11px] text-slate-500">{s.echeance ?? '—'}</span>
-                        </div>
-                      </Card>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <Card className="p-0">
-          <ul className="divide-y divide-white/5">
-            {suivisAffiches.map((s) => {
-              const client = clients.find((c) => c.id === s.clientId);
-              return (
-                <li key={s.id} className="flex items-center justify-between px-5 py-3.5">
-                  <div>
-                    <div className="text-sm font-medium text-white">{s.titre}</div>
-                    <div className="text-xs text-slate-400">{client?.nom} • échéance {s.echeance ?? '—'}</div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <SuiviBadge statut={s.statut} />
-                    <BoutonsAdmin s={s} />
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </Card>
-      ))}
-
-      {form && (
-        <EntityFormModal
-          titre={editId ? 'Modifier le suivi' : 'Ajouter un suivi'}
-          champs={champs(clients, primes)}
-          valeurs={form}
-          onChange={(nom, val) => setForm((f) => ({ ...(f ?? {}), [nom]: val }))}
-          onSubmit={soumettre}
-          onClose={() => { setForm(null); setEditId(null); }}
-        />
-      )}
-      {suppr && (
-        <ConfirmDialog
-          titre="Supprimer ce suivi ?"
-          message={`« ${suppr.titre} » sera supprimé définitivement.`}
-          onConfirm={async () => { await deleteSuivi(suppr.id); setSuppr(null); reload(); }}
-          onClose={() => setSuppr(null)}
-        />
-      )}
-    </Page>
-  );
+    </div>}
+  </Page>;
 }

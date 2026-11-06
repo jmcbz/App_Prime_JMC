@@ -297,32 +297,54 @@ app.put('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, res
 });
 app.delete('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try { await db.deleteClient(parseInt(req.params.id, 10)); res.json({ success: true }); }
-  catch (e) { handleError(res, e, 'Erreur suppression client'); }
+  catch (e) {
+    if (e?.statusCode === 409) return res.status(409).json({ error: e.message });
+    handleError(res, e, 'Erreur suppression client');
+  }
 });
 
 // Suivis
+app.get('/api/tableaux-suivi', auth.requireAuth, async (req, res) => {
+  try { res.json({ tableaux: await db.listTableaux(req.auth.sub, req.auth.role === 'admin') }); }
+  catch (error) { handleError(res, error, 'Erreur chargement des tableaux'); }
+});
+app.post('/api/tableaux-suivi', auth.requireAuth, async (req, res) => {
+  try {
+    const clientId = req.body?.clientId;
+    const expectedActiveId = req.body?.expectedActiveId;
+    if (!Number.isSafeInteger(clientId) || clientId <= 0) return res.status(400).json({ error: 'Client invalide' });
+    if (!Object.hasOwn(req.body ?? {}, 'expectedActiveId') ||
+      (expectedActiveId !== null && (!Number.isSafeInteger(expectedActiveId) || expectedActiveId <= 0)))
+      return res.status(400).json({ error: 'Tableau courant attendu invalide' });
+    res.status(201).json({ tableau: await db.createTableau(clientId, req.auth.sub, req.auth.role === 'admin', expectedActiveId) });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+    handleError(res, error, 'Erreur création tableau');
+  }
+});
+app.put('/api/tableaux-suivi/:id/rubriques/:key', auth.requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: 'Tableau invalide' });
+    res.json({ tableau: await db.updateTableauRubrique(id, req.params.key, req.body, req.auth.sub, req.auth.role === 'admin') });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+    handleError(res, error, 'Erreur mise à jour tableau');
+  }
+});
+
 app.get('/api/suivis', auth.requireAuth, async (req, res) => {
   try { res.json({ suivis: req.auth.role === 'admin' ? await db.listSuivis() : await db.listSuivisForUser(req.auth.sub) }); }
   catch (e) { handleError(res, e, 'Erreur chargement des suivis'); }
 });
-app.post('/api/suivis', auth.requireAuth, auth.requireAdmin, async (req, res) => {
-  try {
-    const { titre } = req.body || {};
-    if (!titre) return res.status(400).json({ error: 'Le titre est requis' });
-    res.status(201).json({ suivi: await db.createSuivi(req.body) });
-  } catch (e) { handleError(res, e, 'Erreur création suivi'); }
+app.post('/api/suivis', auth.requireAuth, auth.requireAdmin, (_req, res) => {
+  res.status(410).json({ error: 'Anciens suivis en lecture seule; utilisez les tableaux par client.' });
 });
-app.put('/api/suivis/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const suivi = await db.updateSuivi(id, req.body || {});
-    if (!suivi) return res.status(404).json({ error: 'Suivi introuvable' });
-    res.json({ suivi });
-  } catch (e) { handleError(res, e, 'Erreur mise à jour suivi'); }
+app.put('/api/suivis/:id', auth.requireAuth, auth.requireAdmin, (_req, res) => {
+  res.status(410).json({ error: 'Anciens suivis en lecture seule; utilisez les tableaux par client.' });
 });
-app.delete('/api/suivis/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
-  try { await db.deleteSuivi(parseInt(req.params.id, 10)); res.json({ success: true }); }
-  catch (e) { handleError(res, e, 'Erreur suppression suivi'); }
+app.delete('/api/suivis/:id', auth.requireAuth, auth.requireAdmin, (_req, res) => {
+  res.status(410).json({ error: 'Anciens suivis conservés en lecture seule.' });
 });
 
 // ---------- Service des fichiers statiques (frontend buildé) en production ----------

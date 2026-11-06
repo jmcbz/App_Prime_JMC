@@ -18,15 +18,15 @@ export default function Dashboard() {
   const stats = [
     { label: isAdmin ? 'Primes actifs' : 'Mon Prime', valeur: primes.length, icon: Users, accent: 'text-titan-cyan' },
     { label: 'Clients suivis', valeur: clients.length, icon: Building2, accent: 'text-bz-blue2' },
-    { label: 'Suivis en cours', valeur: suivisActifs.length, icon: ListChecks, accent: 'text-bz-amber' },
-    { label: 'Points bloqués', valeur: bloques.length, icon: AlertTriangle, accent: 'text-red-400' },
+    { label: 'Suivis en cours (anciens)', valeur: suivisActifs.length, icon: ListChecks, accent: 'text-bz-amber' },
+    { label: 'Points bloqués (anciens)', valeur: bloques.length, icon: AlertTriangle, accent: 'text-red-400' },
   ];
 
   return (
     <Page>
       <PageHeader
         titre="Tour de contrôle"
-        sousTitre={isAdmin ? 'Vue d’ensemble de l’équipe Prime, des clients et des suivis en cours.' : 'Mon Prime, mes clients et mes suivis en cours.'}
+        sousTitre={isAdmin ? 'Vue d’ensemble de l’équipe Prime, des clients et des anciens suivis.' : 'Mon Prime, mes clients et mes anciens suivis.'}
       />
 
       {loading && (
@@ -67,7 +67,7 @@ export default function Dashboard() {
           <div className="mt-6 grid gap-6 lg:grid-cols-3">
             <Card className="lg:col-span-2">
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-sm font-bold uppercase tracking-wide text-slate-300">Suivis prioritaires</h2>
+                <h2 className="text-sm font-bold uppercase tracking-wide text-slate-300">Anciens suivis prioritaires</h2>
                 <Link to="/suivis" className="inline-flex items-center gap-1 text-xs font-medium text-bz-blue2 hover:text-titan-cyan">
                   Tout voir <ArrowRight className="h-3.5 w-3.5" />
                 </Link>
@@ -86,7 +86,7 @@ export default function Dashboard() {
                   );
                 })}
                 {suivisActifs.length + bloques.length === 0 && (
-                  <li className="rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-slate-400">Aucun suivi actif.</li>
+                  <li className="rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-slate-400">Aucun ancien suivi actif.</li>
                 )}
               </ul>
             </Card>

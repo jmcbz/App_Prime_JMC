@@ -194,13 +194,13 @@ if ((await db.listPrimes()).length === 0) {
   assert.equal((await db.listClients()).length,2);
   assert.equal((await db.listSuivis()).length,2);
   assert.equal(conn.sqlite.pragma('foreign_keys', { simple:true }), 1);
-  await db.deletePrime(1);
-  assert.equal((await db.listClients())[0].primeId, null, 'prime deletion must null the client FK');
-  assert.equal((await db.listSuivis())[0].primeId, null, 'prime deletion must null the suivi FK');
-  await db.deleteClient(1);
-  assert.equal((await db.listSuivis()).length,1, 'client deletion must cascade to its suivi');
-  assert.equal((await db.listPrimes()).length,1);
-  assert.equal((await db.listClients()).length,1);
+  const retained = conn.sqlite.prepare('SELECT * FROM suivis WHERE id=1').get();
+  await assert.rejects(db.deletePrime(1), error => error.statusCode === 409);
+  await assert.rejects(db.deleteClient(1), error => error.statusCode === 409);
+  assert.deepEqual(conn.sqlite.prepare('SELECT * FROM suivis WHERE id=1').get(), retained);
+  assert.equal((await db.listPrimes()).length,2);
+  assert.equal((await db.listClients()).length,2);
+  assert.equal((await db.listSuivis()).length,2);
 }
 conn.sqlite.close();
 console.log('SQLITE_SCHEMA_PASS');
@@ -210,7 +210,7 @@ import assert from 'node:assert/strict';
 import * as db from './server/database/index.js';
 const conn = await db.initDb();
 assert.equal(await db.seedMetier(), false);
-assert.equal((await db.listPrimes()).length, process.env.MODE === 'fresh' ? 4 : 1);
+assert.equal((await db.listPrimes()).length, process.env.MODE === 'fresh' ? 4 : 2);
 conn.sqlite.close();
 console.log('SQLITE_SECOND_BOOT_PASS');
 JS

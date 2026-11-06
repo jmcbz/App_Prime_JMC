@@ -8,7 +8,7 @@ process.env.SQLITE_PATH=path.join(dir,'app.sqlite');
 process.env.APP_PRIME_ALLOW_NEW_DATABASE='1';
 delete process.env.DATABASE_URL;
 const db=await import('./database/index.js');
-await db.initDb();
+const driver=await db.initDb();
 
 test('créer un usager standard crée atomiquement son Prime personnel et sa liaison',async()=>{
   const created=await db.createUserWithPrime({email:'aline@example.invalid',passwordHash:'dummy',prenom:'Aline',nom:'Roy',role:'prime'});
@@ -46,27 +46,29 @@ test('un Prime standard ne lit que son profil, ses clients et leurs suivis',asyn
   assert.equal((await db.listSuivis()).length,3);
 });
 
-test('transférer un client réattribue ses suivis au nouveau Prime sans les exposer à l’ancien',async()=>{
+test('transférer un client conserve les anciennes tâches intactes sans les exposer à l’ancien Prime',async()=>{
   const a=await db.getPrimeForUser((await db.getUserByEmail('aline@example.invalid')).id);
   const b=await db.getPrimeForUser((await db.getUserByEmail('bruno@example.invalid')).id);
   const client=await db.createClient({nom:'Client transféré',primeId:a.id,statut:'actif'});
   const suivi=await db.createSuivi({titre:'Suivi transféré',primeId:a.id,clientId:client.id});
+  const before=driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(suivi.id);
   await db.updateClient(client.id,{nom:'Client transféré',primeId:b.id,statut:'actif'}, {primeId:a.id,servoClientId:null});
-  assert.equal((await db.listSuivis()).find(s=>s.id===suivi.id).primeId,b.id);
+  assert.deepEqual(driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(suivi.id),before);
   assert.equal((await db.listSuivisForUser((await db.getUserByEmail('aline@example.invalid')).id)).some(s=>s.id===suivi.id),false);
   assert.equal((await db.listSuivisForUser((await db.getUserByEmail('bruno@example.invalid')).id)).some(s=>s.id===suivi.id),true);
 });
 
-test('un retrait puis une attribution par portefeuille conservent et déplacent les suivis du client',async()=>{
+test('retirer puis réattribuer un client par portefeuille garde ses anciennes tâches identiques',async()=>{
   const a=await db.getPrimeForUser((await db.getUserByEmail('aline@example.invalid')).id);
   const b=await db.getPrimeForUser((await db.getUserByEmail('bruno@example.invalid')).id);
   const client=await db.createClient({nom:'Client Servo transféré',primeId:b.id,servoClientId:11001,statut:'actif'});
   const suivi=await db.createSuivi({titre:'Suivi portefeuille',primeId:b.id,clientId:client.id});
+  const before=driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(suivi.id);
   const profile=(nom)=>({nom,codeTitan:'',specialites:[],disponibilite:'disponible',avatarInitiales:''});
   await db.updatePrimePortfolio(b.id,profile(b.nom),{add:[],remove:[client.id]});
-  assert.equal((await db.listSuivis()).find(s=>s.id===suivi.id).primeId,null);
+  assert.deepEqual(driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(suivi.id),before);
   await db.updatePrimePortfolio(a.id,profile(a.nom),{add:[{id:11001,nom:client.nom,alias:''}],remove:[]});
-  assert.equal((await db.listSuivis()).find(s=>s.id===suivi.id).primeId,a.id);
+  assert.deepEqual(driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(suivi.id),before);
   assert.equal((await db.listSuivisForUser((await db.getUserByEmail('aline@example.invalid')).id)).some(s=>s.id===suivi.id),true);
 });
 
@@ -85,6 +87,15 @@ test('un compte existant peut être explicitement lié à un Prime et retrouve s
   await assert.rejects(db.linkExistingUserToPrime(other.id,prime.id),e=>e.statusCode===409);
   await assert.rejects(db.linkExistingUserToPrime(legacy.id,prime.id),e=>e.statusCode===409);
   assert.deepEqual(await db.listPrimesForUser(other.id),[]);
+});
+
+test('supprimer un Prime avec des anciens suivis sans client est refusé et conserve leur attribution',async()=>{
+  const prime=await db.createPrime({nom:'Prime ancien',codeTitan:'',specialites:[],disponibilite:'disponible'});
+  const suivi=await db.createSuivi({titre:'Tâche sans client',primeId:prime.id,clientId:null});
+  const before=driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(suivi.id);
+  await assert.rejects(db.deletePrime(prime.id),error=>error.statusCode===409);
+  assert.deepEqual(driver.sqlite.prepare('SELECT * FROM suivis WHERE id = ?').get(suivi.id),before);
+  assert.ok((await db.listPrimes()).some(p=>p.id===prime.id));
 });
 
 test('créer un administrateur lui crée également son Prime sans limiter son rôle',async()=>{

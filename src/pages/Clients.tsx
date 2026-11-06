@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { Loader2, Plus, Pencil, Trash2 } from 'lucide-react';
+import { Loader2, Plus, Pencil } from 'lucide-react';
 import { Page, PageHeader } from '../layout/Page';
-import { Card, ConfirmDialog } from '../components/ui';
+import { Card } from '../components/ui';
 import EntityFormModal, { type ChampDef } from '../components/EntityFormModal';
 import { useMetier } from '../hooks/useMetier';
 import { useAuth } from '../context/AuthContext';
 import type { ClientPrime, Prime } from '../services/dataService';
-import { createClient, updateClient, deleteClient, type ClientInput } from '../services/metierAdminService';
+import { createClient, updateClient, type ClientInput } from '../services/metierAdminService';
 
 const STATUT_MAP: Record<ClientPrime['statut'], { label: string; cls: string }> = {
   actif: { label: 'Actif', cls: 'bg-bz-emerald/15 text-bz-emerald border-bz-emerald/30' },
@@ -38,7 +38,6 @@ export default function Clients() {
   const [form, setForm] = useState<Record<string, unknown> | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
   const [expectedLink, setExpectedLink] = useState<Pick<ClientPrime, 'primeId' | 'servoClientId'> | null>(null);
-  const [suppr, setSuppr] = useState<ClientPrime | null>(null);
 
   const ouvrirAjout = () => { setEditId(null); setForm({ nom: '', secteur: '', primeId: '', statut: 'actif' }); };
   const ouvrirEdition = (c: ClientPrime) => {
@@ -115,10 +114,6 @@ export default function Clients() {
                           className="rounded-lg border border-white/10 bg-white/5 p-1.5 text-slate-300 hover:text-white">
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
-                        <button onClick={() => setSuppr(c)} title="Supprimer"
-                          className="rounded-lg border border-red-500/30 bg-red-500/10 p-1.5 text-red-400 hover:bg-red-500/20">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
                       </div>
                     </td>
                   )}
@@ -138,14 +133,6 @@ export default function Clients() {
           onChange={(nom, val) => setForm((f) => ({ ...(f ?? {}), [nom]: val }))}
           onSubmit={soumettre}
           onClose={() => { setForm(null); setEditId(null); setExpectedLink(null); }}
-        />
-      )}
-      {suppr && (
-        <ConfirmDialog
-          titre="Supprimer ce client ?"
-          message={`« ${suppr.nom} » et ses suivis associés seront supprimés définitivement.`}
-          onConfirm={async () => { await deleteClient(suppr.id); setSuppr(null); reload(); }}
-          onClose={() => setSuppr(null)}
         />
       )}
     </Page>
