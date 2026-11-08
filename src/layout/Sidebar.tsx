@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom';
+import { useState } from 'react';
 import { LayoutDashboard, Users, Building2, BookOpen, ListChecks, ShieldCheck, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import LogoTitan from '../components/LogoTitan';
@@ -13,6 +14,12 @@ const NAV = [
 
 export default function Sidebar() {
   const { user, logout } = useAuth();
+  const [logoutError, setLogoutError] = useState('');
+  const guardedLogout = async () => {
+    if (!window.dispatchEvent(new window.Event('client-onboarding:before-logout', { cancelable: true }))) return;
+    try { setLogoutError(''); await logout(); }
+    catch (error) { setLogoutError(`Déconnexion bloquée : ${error instanceof Error ? error.message : 'nettoyage du brouillon impossible'}`); }
+  };
 
   return (
     <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-white/10 bg-bz-dark">
@@ -25,7 +32,7 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-1 px-3 py-4">
-        {NAV.filter(({ to }) => to !== '/procedures' || user?.role === 'admin').map(({ to, label, icon: Icon, end }) => (
+        {NAV.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
             to={to}
@@ -60,6 +67,7 @@ export default function Sidebar() {
       </nav>
 
       <div className="border-t border-white/10 px-4 py-4">
+        {logoutError && <p role="alert" className="mb-2 text-xs text-red-300">{logoutError}</p>}
         {user && (
           <div className="mb-3">
             <div className="truncate text-sm font-medium text-white">{user.prenom} {user.nom}</div>
@@ -70,7 +78,7 @@ export default function Sidebar() {
           </div>
         )}
         <button
-          onClick={logout}
+          onClick={guardedLogout}
           className="flex w-full items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:text-white"
         >
           <LogOut className="h-4 w-4" /> Se déconnecter

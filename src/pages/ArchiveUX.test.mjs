@@ -34,7 +34,7 @@ async function mount(PageComponent, fetcher) {
   return { dom, click, button, cleanup };
 }
 const common = (url) => {
-  if (url === '/api/auth/me') return Response.json({ user: { id: 1, email: 'admin@example.test', role: 'admin' } });
+  if (url === '/api/auth/me') return Response.json({ user: { id: 1, email: 'admin@example.test', prenom: 'Admin', nom: 'Test', role: 'admin', is_active: true } });
   if (url === '/api/primes') return Response.json({ primes: [prime] });
   if (url === '/api/clients') return Response.json({ clients: [client] });
   if (url === '/api/suivis') return Response.json({ suivis: [{ id: 99, clientId: 2, primeId: 7, titre: 'Vieille tâche', statut: 'bloque', echeance: null }] });

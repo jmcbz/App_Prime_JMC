@@ -18,14 +18,38 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 4100;
 const app = express();
 
-app.use(express.json());
+// A populated 11-section checklist can exceed Express's 100kb default.
+app.use(express.json({limit:'2mb'}));
+app.use((error,req,res,next)=>{
+  if(error?.type==='entity.too.large') return res.status(413).json({error:'Corps de requête trop volumineux (maximum 2 Mo)'});
+  next(error);
+});
 app.use(cookieParser());
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || true,
-    credentials: true,
-  })
-);
+// Cookies use SameSite=Lax, which does not isolate sibling subdomains.
+// Compare full origins, not sites; never reflect arbitrary credentialed CORS.
+function trustedOrigin(req, origin) {
+  if (!origin) return false;
+  try {
+    if (new URL(origin).origin !== origin) return false;
+    const frontend = process.env.FRONTEND_URL;
+    if (frontend && new URL(frontend).origin === origin) return true;
+    const protocol = req.get('x-forwarded-proto')?.split(',')[0].trim() || req.protocol;
+    return origin === `${protocol}://${req.get('host')}`;
+  } catch {
+    return false;
+  }
+}
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) &&
+      req.cookies?.[auth.COOKIE_NAME] && req.get('origin') && !trustedOrigin(req, req.get('origin'))) {
+    return res.status(403).json({ error: 'Origine non autorisée' });
+  }
+  next();
+});
+app.use(cors((req, callback) => {
+  const origin = req.get('origin');
+  callback(null, { origin: trustedOrigin(req, origin) ? origin : false, credentials: true });
+}));
 
 // ---------- Auth : login (mot de passe → MFA obligatoire) ----------
 
@@ -281,7 +305,10 @@ app.post('/api/clients', auth.requireAuth, auth.requireAdmin, async (req, res) =
     if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
     // Seule la route portefeuille peut lier un client à l'ID officiel Servo.
     res.status(201).json({ client: await db.createClient({ ...req.body, servoClientId: undefined }) });
-  } catch (e) { handleError(res, e, 'Erreur création client'); }
+  } catch (e) {
+    if (e?.statusCode === 400) return res.status(400).json({ error: e.message });
+    handleError(res, e, 'Erreur création client');
+  }
 });
 app.put('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try {
@@ -301,6 +328,44 @@ app.delete('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, 
     if (e?.statusCode === 409) return res.status(409).json({ error: e.message });
     handleError(res, e, 'Erreur suppression client');
   }
+});
+
+// Prime-owned prise en charge. All authority comes from the current session.
+function onboardingError(res, error) {
+  if ([400,404,409,413].includes(error?.statusCode)) return res.status(error.statusCode).json({ error:error.message });
+  return handleError(res,error,'Erreur prise en charge client');
+}
+function onboardingId(req) {
+  const id=Number(req.params.id);
+  if(!Number.isSafeInteger(id)||id<=0) throw Object.assign(new Error('ID invalide'),{statusCode:400});
+  return id;
+}
+app.get('/api/client-onboardings/options',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.clientOnboardingOptions(req.auth));}catch(e){onboardingError(res,e);}
+});
+app.get('/api/client-onboardings/reconcile',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.reconcileClientOnboarding(req.query.requestKey,req.auth));}catch(e){onboardingError(res,e);}
+});
+app.get('/api/client-onboardings',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.listClientOnboardings(req.auth,req.query));}catch(e){onboardingError(res,e);}
+});
+app.get('/api/client-onboardings/:id/history',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.getClientOnboardingHistory(onboardingId(req),req.auth,req.query));}catch(e){onboardingError(res,e);}
+});
+app.get('/api/client-onboardings/:id',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.getClientOnboarding(onboardingId(req),req.auth));}catch(e){onboardingError(res,e);}
+});
+app.post('/api/client-onboardings',auth.requireAuth,async(req,res)=>{
+  try {res.status(201).json(await db.createClientOnboarding(req.body?.onboarding,req.body?.items,req.auth,req.body?.requestKey));}catch(e){onboardingError(res,e);}
+});
+app.put('/api/client-onboardings/:id',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.updateClientOnboarding(onboardingId(req),req.body?.onboarding,req.body?.items,req.auth,req.body?.expectedVersion));}catch(e){onboardingError(res,e);}
+});
+app.delete('/api/client-onboardings/:id',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.archiveClientOnboarding(onboardingId(req),req.auth,req.body?.expectedVersion));}catch(e){onboardingError(res,e);}
+});
+app.post('/api/client-onboardings/:id/restore',auth.requireAuth,async(req,res)=>{
+  try {res.json(await db.restoreClientOnboarding(onboardingId(req),req.auth,req.body?.expectedVersion));}catch(e){onboardingError(res,e);}
 });
 
 // Suivis

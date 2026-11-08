@@ -16,6 +16,7 @@ export interface Prime {
 
 export interface ClientPrime {
   id: number;
+  clientType?: 'ti' | 'telecom' | null;
   nom: string;
   secteur: string;
   primeId: number | null;

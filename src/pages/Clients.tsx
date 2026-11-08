@@ -18,6 +18,11 @@ function champs(primes: Prime[]): ChampDef[] {
   return [
     { nom: 'nom', label: 'Nom du client', type: 'text', requis: true },
     { nom: 'secteur', label: 'Secteur', type: 'text', placeholder: 'Ex. Municipal' },
+    { nom: 'clientType', label: 'Type de client', type: 'select', options: [
+      { value: '', label: 'Inconnu / non classé' },
+      { value: 'ti', label: 'TI' },
+      { value: 'telecom', label: 'Télécom' },
+    ] },
     { nom: 'primeId', label: 'Prime responsable', type: 'select', options: [
       { value: '', label: '— Aucun —' },
       ...primes.map((p) => ({ value: String(p.id), label: `${p.nom} · ${p.codeTitan}` })),
@@ -39,11 +44,11 @@ export default function Clients() {
   const [editId, setEditId] = useState<number | null>(null);
   const [expectedLink, setExpectedLink] = useState<Pick<ClientPrime, 'primeId' | 'servoClientId'> | null>(null);
 
-  const ouvrirAjout = () => { setEditId(null); setForm({ nom: '', secteur: '', primeId: '', statut: 'actif' }); };
+  const ouvrirAjout = () => { setEditId(null); setForm({ nom: '', secteur: '', primeId: '', statut: 'actif', clientType: '' }); };
   const ouvrirEdition = (c: ClientPrime) => {
     setEditId(c.id);
     setExpectedLink({ primeId: c.primeId, servoClientId: c.servoClientId });
-    setForm({ nom: c.nom, secteur: c.secteur, primeId: c.primeId == null ? '' : String(c.primeId), statut: c.statut });
+    setForm({ nom: c.nom, secteur: c.secteur, primeId: c.primeId == null ? '' : String(c.primeId), statut: c.statut, clientType: c.clientType || '' });
   };
 
   async function soumettre() {
@@ -53,6 +58,7 @@ export default function Clients() {
       secteur: String(f.secteur ?? ''),
       primeId: f.primeId ? Number(f.primeId) : null,
       statut: (f.statut as ClientPrime['statut']) || 'actif',
+      clientType: (f.clientType as 'ti' | 'telecom') || null,
     };
     if (editId !== null) {
       if (!expectedLink) throw new Error('État initial du client manquant');
@@ -86,6 +92,7 @@ export default function Clients() {
             <tr>
               <th className="px-5 py-3 font-semibold">Client</th>
               <th className="px-5 py-3 font-semibold">Secteur</th>
+              {isAdmin && <th className="px-5 py-3 font-semibold">Type de client</th>}
               <th className="px-5 py-3 font-semibold">Prime responsable</th>
               <th className="px-5 py-3 font-semibold">Statut</th>
               {isAdmin && <th className="px-5 py-3 font-semibold text-right">Actions</th>}
@@ -99,6 +106,7 @@ export default function Clients() {
                 <tr key={c.id} className="hover:bg-white/5">
                   <td className="px-5 py-3 font-medium text-white">{c.nom}</td>
                   <td className="px-5 py-3 text-slate-300">{c.secteur}</td>
+                  {isAdmin && <td className="px-5 py-3 text-slate-300">{c.clientType === 'ti' ? 'TI' : c.clientType === 'telecom' ? 'Télécom' : 'Inconnu / non classé'}</td>}
                   <td className="px-5 py-3 text-slate-200">
                     {prime ? <>{prime.nom} <span className="text-titan-cyan">· {prime.codeTitan}</span></> : <span className="text-slate-500">—</span>}
                   </td>

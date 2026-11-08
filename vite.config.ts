@@ -9,7 +9,8 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: process.env.API_PROXY || 'http://127.0.0.1:4100',
-        changeOrigin: true,
+        // Keep the browser Host so the API can verify same-origin cookie writes.
+        changeOrigin: false,
       },
     },
   },

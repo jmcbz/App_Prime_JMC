@@ -119,19 +119,19 @@ export default function Dashboard() {
             </Card>
           </div>
 
-          {isAdmin && <div className="mt-6">
+          <div className="mt-6">
             <Card>
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-sm font-bold uppercase tracking-wide text-slate-300">Trousse d’outils</h2>
-                  <p className="mt-1 text-xs text-slate-400">{PROCEDURES.length} procédures prêtes à dégainer.</p>
+                  <p className="mt-1 text-xs text-slate-400">{isAdmin ? `${PROCEDURES.length} procédures et prise en charge client.` : 'Prise en charge client TI.'}</p>
                 </div>
                 <Link to="/procedures" className="inline-flex items-center gap-1 text-xs font-medium text-bz-blue2 hover:text-titan-cyan">
                   Ouvrir la trousse <ArrowRight className="h-3.5 w-3.5" />
                 </Link>
               </div>
             </Card>
-          </div>}
+          </div>
         </>
       )}
     </Page>

@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Primes from './pages/Primes';
 import Clients from './pages/Clients';
 import Procedures from './pages/Procedures';
+import ClientOnboarding from './pages/ClientOnboarding';
 import Suivis from './pages/Suivis';
 import Administration from './pages/Administration';
 import { useAuth } from './context/AuthContext';
@@ -21,9 +22,9 @@ function ProtectedShell({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
-  const { user, loading } = useAuth();
+  const { user, loading, verified, refresh } = useAuth();
 
-  if (loading) {
+  if (loading && !user) {
     return (
       <div className="flex min-h-screen items-center justify-center titan-grid">
         <Loader2 className="h-6 w-6 animate-spin text-titan-cyan" />
@@ -40,13 +41,20 @@ export default function App() {
     );
   }
 
+  const concealed = loading || !verified;
   return (
+    <>
+    {concealed && <div role="status" className="flex min-h-screen items-center justify-center titan-grid text-white">
+      {loading ? 'Vérification de la session…' : <button type="button" onClick={() => { void refresh().catch(() => {}); }}>Session non vérifiée — réessayer</button>}
+    </div>}
+    <div key={user.id} hidden={concealed} ref={node => { if (node) node.toggleAttribute('inert', concealed); }} aria-hidden={concealed} style={concealed ? { display: 'none' } : undefined}>
     <ProtectedShell>
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/primes" element={<Primes />} />
         <Route path="/clients" element={<Clients />} />
-        <Route path="/procedures" element={user.role === 'admin' ? <Procedures /> : <Navigate to="/" replace />} />
+        <Route path="/procedures" element={<Procedures />} />
+        <Route path="/procedures/prise-en-charge" element={<ClientOnboarding />} />
         <Route path="/suivis" element={<Suivis />} />
         <Route
           path="/administration"
@@ -56,5 +64,7 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </ProtectedShell>
+    </div>
+    </>
   );
 }

@@ -1,5 +1,6 @@
 // Atomic App Prime portfolio update. No writes are sent to Servo.
 import { createInitialTableauSqlite, createTableauForClient } from './tableaux-suivi.js';
+import { pgListTransferLock } from './client-onboardings.js';
 const conflict = (message) => Object.assign(new Error(message), { statusCode: 409 });
 const validId = (value) => Number.isSafeInteger(value) && value > 0;
 
@@ -75,6 +76,9 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
   const connection = await driver.pool.connect();
   try {
     await connection.query('BEGIN');
+    // Lists hold the shared gate before paging across client locks. Acquire its
+    // exclusive side before the portfolio advisory and Prime/client row locks.
+    await pgListTransferLock(sql => connection.query(sql), true);
     await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-servo-portfolio-v1'))");
     const existingPrime = (await connection.query('SELECT * FROM primes WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (!existingPrime) { await connection.query('ROLLBACK'); return null; }

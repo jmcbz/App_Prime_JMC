@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { ChevronDown, Clock, Wrench } from 'lucide-react';
 import { Page, PageHeader } from '../layout/Page';
 import { Card } from '../components/ui';
@@ -15,6 +17,7 @@ const CAT_CLS: Record<CategorieProcedure, string> = {
 };
 
 export default function Procedures() {
+  const { user } = useAuth();
   const [filtre, setFiltre] = useState<(typeof CATEGORIES)[number]>('Toutes');
   const [ouvert, setOuvert] = useState<number | null>(null);
 
@@ -24,10 +27,16 @@ export default function Procedures() {
     <Page>
       <PageHeader
         titre="Trousse d’outils"
-        sousTitre="Procédures prêtes à l’emploi — le gadget-belt des Primes."
+        sousTitre={user?.role === 'admin' ? 'Procédures prêtes à l’emploi et prise en charge client.' : 'Vos outils de prise en charge client.'}
         action={<Wrench className="h-6 w-6 text-titan-cyan" />}
       />
 
+      <Card className="mb-5">
+        <h2 className="font-semibold text-white">Prise en charge client TI</h2>
+        <p className="mt-1 text-sm text-slate-400">Checklist terrain, compte rendu, historique et exports.</p>
+        <Link to="/procedures/prise-en-charge" className="mt-3 inline-flex rounded-lg bg-bz-blue px-4 py-2 text-sm font-semibold text-white">Ouvrir l’outil →</Link>
+      </Card>
+      {user?.role === 'admin' && <>
       <div className="mb-5 flex flex-wrap gap-2">
         {CATEGORIES.map((c) => (
           <button
@@ -87,6 +96,7 @@ export default function Procedures() {
           );
         })}
       </div>
+      </>}
     </Page>
   );
 }

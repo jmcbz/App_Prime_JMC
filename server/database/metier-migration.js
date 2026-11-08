@@ -12,9 +12,14 @@ const CORE = {
 };
 const LEGACY_REQUIRED = { primes: 'nom', clients: 'nom', suivis: 'titre' };
 const BOARD_COLUMNS = {
+  client_onboardings: ['id','client_id','technicien_id','titre','statut','priorite','urgence_ti','site_principal','contact_principal','periode_couverte','prepare_pour','avancement_global','risques_critiques','actions_ouvertes','decisions_requises','prochaine_rencontre','version','data','archived','archived_at','compte_rendu','created_by_id','created_by_email','updated_by_id','updated_by_email','created_at','updated_at'],
+  client_onboarding_items: ['id','onboarding_id','section_key','section_title','item_order','checked','priorite','statut','element','notes','action','responsable','echeance','created_at','updated_at'],
+  client_onboarding_history: ['id','onboarding_id','event_type','snapshot','actor_id','actor_email','created_at'],
   tableaux_suivi: ['id', 'client_id', 'created_at', 'archived_at'],
   tableau_rubriques: ['tableau_id', 'key', 'statut', 'date', 'note', 'prochaine_action', 'version'],
 };
+const ONBOARDING_TEXT = ['titre','statut','priorite','urgence_ti','site_principal','contact_principal','periode_couverte','prepare_pour','avancement_global','risques_critiques','actions_ouvertes','decisions_requises','prochaine_rencontre','created_by_email','updated_by_email'];
+const ITEM_TEXT = ['section_key','section_title','priorite','statut','element','notes','action','responsable'];
 const OWNED_TABLES = new Set(['users', 'user_mfa', 'prime_user_links', ...Object.keys(BOARD_COLUMNS), ...Object.keys(TABLES)]);
 const USER_COLUMNS = {
   users: ['id', 'email', 'password_hash', 'prenom', 'nom', 'role', 'is_active', 'created_at'],
@@ -28,10 +33,20 @@ const PG_TYPES = {
   primes: { id: 'int4', created_at: 'timestamp', specialites: 'jsonb' },
   clients: { id: 'int4', prime_id: 'int4', created_at: 'timestamp' },
   suivis: { id: 'int4', client_id: 'int4', prime_id: 'int4', created_at: 'timestamp' },
+  client_onboardings: { id:'int4',request_key:'text',client_id:'int4',technicien_id:'int4',created_by_id:'int4',updated_by_id:'int4',version:'int4',data:'jsonb',compte_rendu:'jsonb',archived:'bool',created_at:'timestamp',updated_at:'timestamp',archived_at:'timestamp',...Object.fromEntries(ONBOARDING_TEXT.map(k=>[k,'text'])) },
+  client_onboarding_items: { id:'int4',onboarding_id:'int4',item_order:'int4',checked:'bool',echeance:'date',created_at:'timestamp',updated_at:'timestamp',...Object.fromEntries(ITEM_TEXT.map(k=>[k,'text'])) },
+  client_onboarding_history: { id:'int4',onboarding_id:'int4',snapshot:'jsonb',actor_id:'int4',actor_email:'text',event_type:'text',created_at:'timestamp' },
   tableaux_suivi: { id: 'int4', client_id: 'int4', created_at: 'timestamp', archived_at: 'timestamp' },
   tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', version: 'text' },
 };
 const PG_FOREIGN_KEYS = [
+  ['client_onboardings','client_id','clients','id','RESTRICT'],
+  ['client_onboardings','technicien_id','users','id','SET NULL'],
+  ['client_onboardings','created_by_id','users','id','SET NULL'],
+  ['client_onboardings','updated_by_id','users','id','SET NULL'],
+  ['client_onboarding_items','onboarding_id','client_onboardings','id','CASCADE'],
+  ['client_onboarding_history','onboarding_id','client_onboardings','id','CASCADE'],
+  ['client_onboarding_history','actor_id','users','id','SET NULL'],
   ['user_mfa', 'user_id', 'users', 'id', 'CASCADE'],
   ['prime_user_links', 'user_id', 'users', 'id', 'CASCADE'],
   ['prime_user_links', 'prime_id', 'primes', 'id', 'RESTRICT'],
@@ -48,10 +63,17 @@ const SQLITE_TYPES = {
   primes: { id: 'INTEGER', created_at: 'TEXT', specialites: 'TEXT' },
   clients: { id: 'INTEGER', prime_id: 'INTEGER', created_at: 'TEXT' },
   suivis: { id: 'INTEGER', client_id: 'INTEGER', prime_id: 'INTEGER', created_at: 'TEXT' },
+  client_onboardings: { id:'INTEGER',request_key:'TEXT',client_id:'INTEGER',technicien_id:'INTEGER',created_by_id:'INTEGER',updated_by_id:'INTEGER',version:'INTEGER',data:'TEXT',compte_rendu:'TEXT',archived:'INTEGER',created_at:'TEXT',updated_at:'TEXT',archived_at:'TEXT',...Object.fromEntries(ONBOARDING_TEXT.map(k=>[k,'TEXT'])) },
+  client_onboarding_items: { id:'INTEGER',onboarding_id:'INTEGER',item_order:'INTEGER',checked:'INTEGER',echeance:'TEXT',created_at:'TEXT',updated_at:'TEXT',...Object.fromEntries(ITEM_TEXT.map(k=>[k,'TEXT'])) },
+  client_onboarding_history: { id:'INTEGER',onboarding_id:'INTEGER',snapshot:'TEXT',actor_id:'INTEGER',actor_email:'TEXT',event_type:'TEXT',created_at:'TEXT' },
   tableaux_suivi: { id: 'INTEGER', client_id: 'INTEGER', created_at: 'TEXT', archived_at: 'TEXT' },
   tableau_rubriques: { tableau_id: 'INTEGER', key: 'TEXT', statut: 'TEXT', date: 'TEXT', note: 'TEXT', prochaine_action: 'TEXT', version: 'TEXT' },
 };
 
+function checkOnboardingSet(names) {
+  const found=['client_onboardings','client_onboarding_items','client_onboarding_history'].filter(t=>names.has(t));
+  if(found.length && found.length!==3) throw new Error('Schéma App Prime incomplet: tables prise en charge');
+}
 function inspect(table, columns, type = 'pg') {
   if (!columns.size) return false; // This table will be created from the new schema.
   for (const name of CORE[table]) {
@@ -87,6 +109,7 @@ export async function checkPgMetierIdentity(pool) {
      WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`,
   );
   const names = new Set(tables.rows.map(row => row.table_name));
+  checkOnboardingSet(names);
   if ([...names].some(name => !OWNED_TABLES.has(name))) {
     throw new Error('Schéma étranger à App Prime: tables non autorisées');
   }
@@ -176,6 +199,36 @@ export async function checkPgMetierIdentity(pool) {
         throw new Error('Schéma étranger à App Prime: unicité prime_user_links.prime_id absente');
       }
     }
+    if (names.has('client_onboarding_items')) {
+      const groups=new Map();
+      for(const r of keys.rows.filter(r=>r.table_name==='client_onboarding_items' && r.constraint_type==='UNIQUE')) {
+        if(!groups.has(r.constraint_name)) groups.set(r.constraint_name,[]);
+        groups.get(r.constraint_name).push(r.column_name);
+      }
+      if (![...groups.values()].some(cols=>new Set(cols).size===3 && ['onboarding_id','section_key','item_order'].every(c=>cols.includes(c)))) throw new Error('Schéma App Prime: unicité des items absente');
+    }
+    if (names.has('client_onboardings') && allColumns.client_onboardings.has('request_key')) {
+      const nullable=await pool.query("SELECT is_nullable FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='client_onboardings' AND column_name='request_key'");
+      const groups=new Map();
+      for(const r of keys.rows.filter(r=>r.table_name==='client_onboardings' && r.constraint_type==='UNIQUE')) {
+        if(!groups.has(r.constraint_name)) groups.set(r.constraint_name,[]);
+        groups.get(r.constraint_name).push(r.column_name);
+      }
+      const unique=[...groups.values()].some(columns=>columns.length===1 && columns[0]==='request_key');
+      if (nullable.rows[0].is_nullable!=='NO' || !unique) throw new Error('Schéma App Prime: request_key non unique ou nullable');
+      const invalid=await pool.query("SELECT 1 FROM client_onboardings WHERE request_key !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' LIMIT 1");
+      if (invalid.rowCount) throw new Error('Schéma App Prime: request_key invalide');
+    }
+    const expectedIndexes={idx_prime_onboarding_client:['client_onboardings','client_id'],idx_prime_onboarding_technicien:['client_onboardings','technicien_id'],idx_prime_onboarding_archived:['client_onboardings','archived','id'],idx_prime_onboarding_items:['client_onboarding_items','onboarding_id'],idx_prime_onboarding_history:['client_onboarding_history','onboarding_id','id']};
+    const indexes=await pool.query('SELECT indexname, tablename, indexdef FROM pg_indexes WHERE schemaname=current_schema()');
+    for(const index of indexes.rows) if(expectedIndexes[index.indexname]) {
+      const [table,...fields]=expectedIndexes[index.indexname];
+      if(index.tablename!==table || !index.indexdef.includes(`(${fields.join(', ')})`)) throw new Error(`Schéma App Prime: index ${index.indexname} incompatible`);
+    }
+    for(const [table,field] of [['client_onboardings','data'],['client_onboardings','compte_rendu'],['client_onboarding_history','snapshot']]) if(names.has(table)) {
+      const invalid=await pool.query(`SELECT 1 FROM ${table} WHERE jsonb_typeof(${field}) IS DISTINCT FROM 'object' LIMIT 1`);
+      if(invalid.rowCount) throw new Error(`Schéma App Prime: ${table}.${field} doit être un objet JSON`);
+    }
     for (const [table, column, refTable, refColumn, deleteRule] of PG_FOREIGN_KEYS) {
       if (!names.has(table)) continue;
       if (!keys.rows.some(row => row.table_name === table && row.column_name === column &&
@@ -208,6 +261,7 @@ export async function migratePgMetier(pool, createSchema) {
     await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-metier-json-v1'))");
     await checkPgMetierIdentity(connection);
     await createSchema(connection);
+    await (await import('./client-onboardings.js')).createOnboardingSchemaPg(connection);
     const found = await pgColumns(connection);
     const legacy = {};
     for (const table of Object.keys(TABLES)) {
@@ -260,6 +314,7 @@ export function checkSqliteMetierIdentity(sqlite) {
   const names = new Set(sqlite.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
   ).all().map(row => row.name));
+  checkOnboardingSet(names);
   if ([...names].some(name => !OWNED_TABLES.has(name))) {
     throw new Error('Schéma étranger à App Prime: tables non autorisées');
   }
@@ -282,6 +337,18 @@ export function checkSqliteMetierIdentity(sqlite) {
   if (names.has('tableaux_suivi') !== names.has('tableau_rubriques')) {
     throw new Error('Schéma étranger à App Prime: tables de suivi incomplètes');
   }
+  const expectedIndexes={idx_prime_onboarding_client:['client_onboardings','client_id'],idx_prime_onboarding_technicien:['client_onboardings','technicien_id'],idx_prime_onboarding_archived:['client_onboardings','archived','id'],idx_prime_onboarding_items:['client_onboarding_items','onboarding_id'],idx_prime_onboarding_history:['client_onboarding_history','onboarding_id','id']};
+  for(const [index,[table,...fields]] of Object.entries(expectedIndexes)) {
+    const actual=sqlite.prepare("SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?").get(index);
+    if(actual && (actual.tbl_name!==table || !actual.sql?.includes(`(${fields.join(',')})`))) throw new Error(`Schéma App Prime: index ${index} incompatible`);
+  }
+  for(const [table,field] of [['client_onboardings','data'],['client_onboardings','compte_rendu'],['client_onboarding_history','snapshot']]) if(names.has(table)) {
+    for(const record of sqlite.prepare(`SELECT id,${field} AS value FROM ${table}`).iterate()) {
+      let parsed;
+      try { parsed=JSON.parse(record.value); } catch { throw new Error(`Schéma App Prime: ${table}.${field} JSON invalide`); }
+      if(!parsed || Array.isArray(parsed) || typeof parsed!=='object') throw new Error(`Schéma App Prime: ${table}.${field} doit être un objet JSON`);
+    }
+  }
   for (const table of Object.keys(TABLES)) inspect(table, sqliteColumns(sqlite, table), 'sqlite');
   for (const table of names) {
     const rows = sqlite.prepare(`PRAGMA table_info(${table})`).all();
@@ -298,6 +365,23 @@ export function checkSqliteMetierIdentity(sqlite) {
       if (rows.filter(row => row.pk).length !== 1 || columns.get(primaryKey)?.pk !== 1) {
         throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${primaryKey} incompatible`);
       }
+    }
+    if (table === 'client_onboardings' && columns.has('request_key')) {
+      const unique=sqlite.prepare('PRAGMA index_list(client_onboardings)').all().some(index=>index.unique===1 && index.partial===0 &&
+        sqlite.prepare(`PRAGMA index_info("${index.name.replaceAll('"','""')}")`).all().map(r=>r.name).join(',')==='request_key');
+      const hex=n=>'[0-9a-f]'.repeat(n);
+      const uuidPattern=`${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
+      if (columns.get('request_key').notnull!==1 || !unique ||
+        sqlite.prepare('SELECT 1 FROM client_onboardings WHERE request_key NOT GLOB ? LIMIT 1').get(uuidPattern)) throw new Error('Schéma App Prime: request_key non unique, nullable ou invalide');
+    }
+    if (table === 'client_onboarding_items') {
+      const unique=sqlite.prepare('PRAGMA index_list(client_onboarding_items)').all().some(index=>{
+        if(!index.unique) return false;
+        const escaped=index.name.replaceAll('"','""');
+        const cols=sqlite.prepare(`PRAGMA index_info("${escaped}")`).all().map(r=>r.name);
+        return cols.length===3 && ['onboarding_id','section_key','item_order'].every(c=>cols.includes(c));
+      });
+      if(!unique) throw new Error('Schéma App Prime: unicité des items absente');
     }
     if (table === 'prime_user_links') {
       if (columns.get('prime_id')?.notnull !== 1) {

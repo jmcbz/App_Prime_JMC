@@ -73,14 +73,26 @@ async function postMfa(url: string, body: Record<string, string>): Promise<Login
 }
 
 export async function logout(): Promise<void> {
-  try { await fetch(`${API}/logout`, { method: 'POST', credentials: 'include' }); } catch { /* ignore */ }
+  const response = await fetch(`${API}/logout`, { method: 'POST', credentials: 'include' });
+  if (!response.ok) throw new Error(`Déconnexion impossible (${response.status})`);
+}
+
+function isUser(value: unknown): value is User {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const user = value as Record<string, unknown>;
+  return Number.isSafeInteger(user.id) && (user.id as number) > 0 &&
+    typeof user.email === 'string' && user.email.length > 0 &&
+    typeof user.prenom === 'string' && typeof user.nom === 'string' &&
+    (user.role === 'admin' || user.role === 'prime') && user.is_active === true;
 }
 
 export async function checkAuth(): Promise<User | null> {
-  try {
-    const r = await fetch(`${API}/me`, { credentials: 'include' });
-    if (!r.ok) return null;
-    const d = await parseJson(r);
-    return d.user || null;
-  } catch { return null; }
+  // Only an explicit 401 proves expiry. A malformed 200 leaves identity unknown.
+  const r = await fetch(`${API}/me`, { credentials: 'include' });
+  if (r.status === 401) return null;
+  if (!r.ok) throw new Error(`Vérification de session indisponible (${r.status})`);
+  const d: unknown = await r.json();
+  const user = d && typeof d === 'object' && !Array.isArray(d) ? (d as Record<string, unknown>).user : undefined;
+  if (!isUser(user)) throw new Error('Réponse de vérification de session invalide');
+  return user;
 }

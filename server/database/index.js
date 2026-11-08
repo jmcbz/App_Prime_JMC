@@ -7,6 +7,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier } from './metier-migration.js';
 import { applyPrimePortfolio } from './prime-portfolio.js';
+import * as onboardings from './client-onboardings.js';
+import { createOnboardingSchemaSqlite, createOnboardingSchemaPg } from './client-onboardings.js';
+import { guardSqlite, withSqliteOwner } from './sqlite-isolation.js';
 import { backfillTableaux, createInitialTableauSqlite, createTableauForClient, listTableaux as listTableauxRows, updateRubrique as updateRubriqueRow } from './tableaux-suivi.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -58,16 +61,21 @@ export async function initDb() {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     const sqlite = new BetterSqlite3(dbPath);
     try {
-      sqlite.pragma('foreign_keys = ON');
+      // Rebuilding the legacy onboarding table requires FK enforcement off
+      // before BEGIN; verify all references before turning it back on.
+      sqlite.pragma('foreign_keys = OFF');
       const legacyColumns = sqlite.transaction(() => {
         checkSqliteMetierIdentity(sqlite);
         createSchemaSqlite(sqlite);
         const legacyColumns = migrateSqliteMetier(sqlite);
         sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_servo_id ON clients(json_extract(data, '$.servoClientId')) WHERE json_extract(data, '$.servoClientId') IS NOT NULL");
+        createOnboardingSchemaSqlite(sqlite);
+        if (sqlite.pragma('foreign_key_check').length) throw new Error('Schéma App Prime: références étrangères invalides');
         return legacyColumns;
       }).immediate();
+      sqlite.pragma('foreign_keys = ON');
       sqlite.pragma('journal_mode = WAL');
-      driver = { kind: 'sqlite', sqlite, legacyColumns };
+      driver = { kind: 'sqlite', sqlite: guardSqlite(sqlite), legacyColumns };
       await backfillTableaux(driver);
       console.log(`✅ Base de données SQLite initialisée (${dbPath})`);
     } catch (error) {
@@ -676,12 +684,20 @@ function normalizeClient(row) {
     secteur: d.secteur || '',
     primeId: row.prime_id ?? null,
     statut: d.statut || 'actif',
+    clientType: d.clientType === 'ti' || d.clientType === 'telecom' ? d.clientType : null,
     servoClientId: Number.isSafeInteger(d.servoClientId) && d.servoClientId > 0 ? d.servoClientId : null,
   };
 }
 
-function clientData({ nom, secteur, statut, servoClientId }) {
+function validateClientType(value) {
+  if (value !== null && value !== 'ti' && value !== 'telecom') {
+    throw Object.assign(new Error('Type de client invalide'), { statusCode: 400 });
+  }
+  return value;
+}
+function clientData({ nom, secteur, statut, servoClientId, clientType = null }) {
   return { nom: nom || '', secteur: secteur || '', statut: statut || 'actif',
+    clientType: validateClientType(clientType),
     ...(Number.isSafeInteger(servoClientId) && servoClientId > 0 ? { servoClientId } : {}) };
 }
 
@@ -738,10 +754,18 @@ export async function updateClient(id, input, expected) {
   if (!expected || !Object.hasOwn(expected, 'primeId') || !Object.hasOwn(expected, 'servoClientId') ||
     (expected.primeId !== null && (!Number.isSafeInteger(expected.primeId) || expected.primeId <= 0)) ||
     (expected.servoClientId !== null && (!Number.isSafeInteger(expected.servoClientId) || expected.servoClientId <= 0))) throw bad();
+  if (Object.hasOwn(input, 'clientType')) validateClientType(input.clientType);
   const update = (row) => {
     const current = normalizeClient(row);
     if (current.primeId !== expected.primeId || current.servoClientId !== expected.servoClientId) throw conflict();
-    const data = { ...parseData(row.data), ...clientData({ ...input, servoClientId: current.servoClientId }) };
+    const nextType = Object.hasOwn(input, 'clientType') ? validateClientType(input.clientType) : current.clientType;
+    if (current.clientType === 'ti' && nextType !== 'ti') {
+      const exists = driver.kind === 'sqlite'
+        ? driver.sqlite.prepare('SELECT 1 FROM client_onboardings WHERE client_id = ? LIMIT 1').get(id)
+        : null;
+      if (exists) throw Object.assign(new Error('Classement TI requis tant que des prises en charge sont conservées'), { statusCode: 409 });
+    }
+    const data = { ...parseData(row.data), ...clientData({ ...input, clientType: nextType, servoClientId: current.servoClientId }) };
     return { data: JSON.stringify(data), prime_id: input.primeId ?? null, ...legacyValues('clients', data) };
   };
   if (driver.kind === 'sqlite') {
@@ -761,6 +785,10 @@ export async function updateClient(id, input, expected) {
     await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-servo-portfolio-v1'))");
     const row = (await connection.query('SELECT * FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (!row) { await connection.query('ROLLBACK'); return null; }
+    if (normalizeClient(row).clientType === 'ti' && Object.hasOwn(input, 'clientType') && input.clientType !== 'ti') {
+      const retained = await connection.query('SELECT 1 FROM client_onboardings WHERE client_id = $1 LIMIT 1', [id]);
+      if (retained.rowCount) throw Object.assign(new Error('Classement TI requis tant que des prises en charge sont conservées'), { statusCode: 409 });
+    }
     const fields = update(row);
     const keys = Object.keys(fields), values = Object.values(fields);
     const updated = (await connection.query(`UPDATE clients SET ${keys.map((key, i) => `${key} = $${i + 1}${key === 'data' ? '::jsonb' : ''}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${keys.length + 1} RETURNING *`, [...values, id])).rows[0];
@@ -772,13 +800,23 @@ export async function updateClient(id, input, expected) {
   } finally { connection.release(); }
 }
 
+export async function listClientOnboardings(actor, filters) { return onboardings.list(driver,actor,filters); }
+export async function getClientOnboarding(id, actor) { return onboardings.detail(driver,id,actor); }
+export async function getClientOnboardingHistory(id, actor, params) { return onboardings.historyPage(driver,id,actor,params); }
+export async function createClientOnboarding(data, items, actor, requestKey) { return onboardings.create(driver,data,items,actor,requestKey); }
+export async function reconcileClientOnboarding(requestKey, actor) { return onboardings.reconcile(driver,requestKey,actor); }
+export async function updateClientOnboarding(id, data, items, actor, expectedVersion) { return onboardings.mutate(driver,id,data,items,actor,'updated',expectedVersion); }
+export async function archiveClientOnboarding(id, actor, expectedVersion) { return onboardings.mutate(driver,id,null,undefined,actor,'deleted',expectedVersion); }
+export async function restoreClientOnboarding(id, actor, expectedVersion) { return onboardings.mutate(driver,id,null,undefined,actor,'restored',expectedVersion); }
+export async function clientOnboardingOptions(actor) { return onboardings.options(driver,actor); }
+
 export async function deleteClient(id) {
   const retained = () => Object.assign(new Error('Client non supprimable : ses tableaux et anciens suivis doivent être conservés. Retirez plutôt son attribution au Prime.'), { statusCode: 409 });
   if (driver.kind === 'sqlite') {
     return driver.sqlite.transaction(() => {
       const present = driver.sqlite.prepare('SELECT 1 FROM clients WHERE id = ?').get(id);
       if (!present) return;
-      const history = driver.sqlite.prepare('SELECT 1 FROM tableaux_suivi WHERE client_id = ? UNION SELECT 1 FROM suivis WHERE client_id = ? LIMIT 1').get(id,id);
+      const history = driver.sqlite.prepare('SELECT 1 FROM tableaux_suivi WHERE client_id = ? UNION SELECT 1 FROM suivis WHERE client_id = ? UNION SELECT 1 FROM client_onboardings WHERE client_id = ? LIMIT 1').get(id,id,id);
       if (history) throw retained();
       driver.sqlite.prepare('DELETE FROM clients WHERE id = ?').run(id);
     }).immediate();
@@ -788,7 +826,7 @@ export async function deleteClient(id) {
     await tx.query('BEGIN');
     const present = (await tx.query('SELECT id FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (present) {
-      const history = await tx.query('SELECT 1 FROM tableaux_suivi WHERE client_id = $1 UNION SELECT 1 FROM suivis WHERE client_id = $1 LIMIT 1', [id]);
+      const history = await tx.query('SELECT 1 FROM tableaux_suivi WHERE client_id = $1 UNION SELECT 1 FROM suivis WHERE client_id = $1 UNION SELECT 1 FROM client_onboardings WHERE client_id = $1 LIMIT 1', [id]);
       if (history.rowCount) throw retained();
       await tx.query('DELETE FROM clients WHERE id = $1', [id]);
     }
@@ -864,6 +902,10 @@ async function countRows(table, connection = null) {
 
 /** Insère les données initiales si primes/clients/suivis sont vides. Idempotent. */
 export async function seedMetier() {
+  return driver.kind === 'sqlite' ? withSqliteOwner(seedMetierBody) : seedMetierBody();
+}
+
+async function seedMetierBody() {
   const connection = driver.kind === 'pg' ? await driver.pool.connect() : null;
   const execute = sql => connection ? connection.query(sql) : driver.sqlite.exec(sql);
   try {
