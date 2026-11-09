@@ -30,6 +30,58 @@ async function request(method,route,who,body,origin){const response=await fetch(
 const section=[{title:'Préparation',steps:[{id:'audit',title:'Audit',note:'Noter le modèle'}]}];
 try {
   for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok)break;}catch{}await new Promise(r=>setTimeout(r,50));}
+  await test('audit source requires a current TI portfolio and a matching visible template over SQLite HTTP',async()=>{
+    const global=(await request('GET','/api/workstation-procedures/templates','a')).body.templates[0];
+    const local=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:own.id,name:'Audit local',sections:section})).template;
+    const other=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:foreign.id,name:'Foreign model',sections:section})).template;
+    const unknown=await db.createClient({nom:'Unclassified',primeId:a.prime.id});
+    const unassigned=await db.createClient({nom:'No Prime',clientType:'ti'});
+    assert((await request('GET','/api/clients','a')).body.clients.some(c=>c.id===unknown.id));
+    const url=(c,t)=>`/api/workstation-procedures/audit-source?clientId=${c}&templateId=${t}`;
+    const expected={client:{id:own.id,nom:'Own TI'},template:{id:local.id,clientId:own.id,name:'Audit local',version:1,sections:section}};
+    assert.deepEqual(await request('GET',url(own.id,local.id),'a'),{status:200,body:expected});
+    assert.deepEqual((await request('GET',url(own.id,global.id),'a')).body,{client:expected.client,template:global});
+    assert.deepEqual((await request('GET',url(foreign.id,other.id),'admin')).body,{client:{id:foreign.id,nom:'Foreign TI'},template:other});
+    assert.equal((await request('GET',url(own.id,local.id))).status,401);
+    for(const who of ['a','admin'])for(const c of [telecom.id,unknown.id,unassigned.id])assert.equal((await request('GET',url(c,global.id),who)).status,404);
+    assert.equal((await request('GET',url(foreign.id,other.id),'a')).status,404);
+    for(const who of ['a','admin'])assert.equal((await request('GET',url(own.id,other.id),who)).status,404);
+    for(const bad of ['0','-1','1x','1.0','9007199254740992',''])assert.equal((await request('GET',url(bad,local.id),'a')).status,400);
+    assert.equal((await request('GET',url(own.id,'1x'),'a')).status,400);
+    assert.equal((await request('GET',`/api/workstation-procedures/audit-source?clientId=${own.id}`,'a')).status,400);
+    const moved=await db.createClient({nom:'Moving TI',clientType:'ti',primeId:a.prime.id});
+    assert.equal((await request('GET',url(moved.id,global.id),'a')).status,200);
+    await db.updateClient(moved.id,{nom:'Moving TI',primeId:b.prime.id},{primeId:a.prime.id,servoClientId:null});
+    assert.equal((await request('GET',url(moved.id,global.id),'a')).status,404);
+    assert.equal((await request('GET',url(moved.id,global.id),'b')).status,200);
+  });
+  await test('saved dossier audit source checks current assignment while historical reads remain unchanged (SQLite HTTP)',async()=>{
+    const template=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:null,name:'Audit snapshot',sections:section})).template;
+    const client=await db.createClient({nom:'Snapshot TI',clientType:'ti',primeId:a.prime.id});
+    const dossier=(await db.createWorkstationDossier({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:client.id,templateId:template.id,employee:'Employee',computer:'PC',ticket:'T',date:'2026-11-09'})).dossier;
+    const url=`/api/workstation-procedures/audit-source/dossier/${dossier.id}`;
+    assert.deepEqual(await request('GET',url,'a'),{status:200,body:{dossier}});
+    assert.deepEqual(await request('GET',url,'admin'),{status:200,body:{dossier}});
+    assert.equal((await request('GET',url)).status,401);
+    assert.equal((await request('GET',url,'b')).status,404);
+    assert.equal((await request('GET','/api/workstation-procedures/audit-source/dossier/999999','admin')).status,404);
+    for(const bad of ['0','-1','1x','1.0','9007199254740992'])assert.equal((await request('GET',`/api/workstation-procedures/audit-source/dossier/${bad}`,'admin')).status,400);
+    driver.sqlite.prepare('UPDATE workstation_templates SET name=?,sections=? WHERE id=?').run('Edited',JSON.stringify([{title:'Changed',steps:[{id:'changed',title:'Changed',note:''}]}]),template.id);
+    assert.deepEqual((await request('GET',url,'a')).body,{dossier});
+    await db.updateClient(client.id,{nom:'Snapshot TI',primeId:b.prime.id},{primeId:a.prime.id,servoClientId:null});
+    assert.equal((await request('GET',url,'a')).status,404);
+    assert.deepEqual((await request('GET',url,'b')).body,{dossier});
+    driver.sqlite.prepare('UPDATE clients SET prime_id=NULL WHERE id=?').run(client.id);
+    assert.equal((await request('GET',url,'admin')).status,404);
+    assert.equal((await request('GET',url,'b')).status,404);
+    assert.deepEqual((await request('GET',`/api/workstation-procedures/dossiers/${dossier.id}`,'admin')).body,{dossier});
+    driver.sqlite.prepare('UPDATE clients SET prime_id=? WHERE id=?').run(a.prime.id,client.id);
+    for(const type of ['telecom',null]){
+      driver.sqlite.prepare('UPDATE clients SET data=? WHERE id=?').run(JSON.stringify({nom:'Snapshot TI',clientType:type}),client.id);
+      assert.equal((await request('GET',url,'admin')).status,404);
+      assert.equal((await request('GET',url,'a')).status,404);
+    }
+  });
   await test('shared templates and scoped dossier snapshots over authenticated HTTP',async()=>{
     const initial=await request('GET','/api/workstation-procedures/templates','a');
     assert.equal(initial.status,200,logs);

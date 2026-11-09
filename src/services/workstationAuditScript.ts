@@ -6,7 +6,12 @@ export type WorkstationAuditOptions = {
   keyboards: string[];
   printerName: string;
   apps: string[];
+  /** Opt-in: pass the opened dossier snapshot, otherwise the selected client's template. */
+  procedure?: { name: string; sections: AuditProcedureSection[]; source?: string };
 };
+
+export type AuditProcedureStep = { id: string; title: string; note: string; etat?: 'todo' | 'fait' | 'na'; commentaire?: string };
+export type AuditProcedureSection = { title: string; steps: AuditProcedureStep[] };
 
 export const DEFAULT_WORKSTATION_AUDIT_OPTIONS: WorkstationAuditOptions = {
   clientName: 'BZ', computerPrefix: 'PC-', adminLocal: 'bzinc',
@@ -54,6 +59,10 @@ $script:Resultats = New-Object System.Collections.ArrayList
 
 function Add-Check {
     param([string]$Categorie,[string]$Nom,[string]$Etat,[string]$Detail)
+    if ($script:ManualStepRequiresVerification -and $Etat -eq 'OK') {
+        $Etat = 'A VERIFIER'
+        $Detail += ' — Validation manuelle de la note requise'
+    }
     [void]$script:Resultats.Add([pscustomobject]@{
         Categorie = $Categorie; Nom = $Nom; Etat = $Etat; Detail = $Detail })
     $c = switch ($Etat) { 'OK' {'Green'} 'ECHEC' {'Red'} default {'Yellow'} }
@@ -338,6 +347,103 @@ try { Start-Process -FilePath $fichier } catch {}
 exit $(if ($complete) { 0 } else { 1 })
 `;
 
+// Only complete, unambiguous standard steps map to existing single-result probes.
+// Composite steps (Autopilot, licensed Adobe, shortcuts, default apps, etc.) stay manual:
+// a partial probe must never mark the entire instruction OK.
+const STANDARD_PROBES: Record<string, { title: string; block: number }> = {
+  'bz-1-1': { title: 'Installer / valider Windows 11 Pro', block: 1 },
+  'bz-1-4': { title: 'Ajouter le compte admin local bzinc', block: 5 },
+  'bz-2-1': { title: 'Mises à jour Windows', block: 6 },
+  'bz-2-7': { title: "Installer l'imprimante du client", block: 10 },
+  'bz-3-3': { title: 'Clavier : retirer les autres langues, garder FR/CA', block: 8 },
+};
+
+function validateProcedure(options: WorkstationAuditOptions): AuditProcedureSection[] {
+  const validText = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max && !value.includes('\u0000');
+  const sections = options.procedure?.sections;
+  if (!validText(options.procedure?.name, 250) || !options.procedure?.name.trim() ||
+      (options.procedure?.source !== undefined && !validText(options.procedure.source, 250)) ||
+      !Array.isArray(sections) || sections.length > 30 ||
+      !sections.every(section => section && validText(section.title, 250) && Array.isArray(section.steps) && section.steps.length <= 300 &&
+        section.steps.every((step: AuditProcedureStep) => step && validText(step.id, 100) && validText(step.title, 250) &&
+          validText(step.note, 4000) && (step.commentaire === undefined || validText(step.commentaire, 4000)) &&
+          (step.etat === undefined || ['todo', 'fait', 'na'].includes(step.etat)))) ||
+      sections.reduce((n, section) => n + section.steps.length, 0) > 300) {
+    throw new Error('Données de procédure invalides ou trop volumineuses');
+  }
+  return sections;
+}
+
+function procedureScript(options: WorkstationAuditOptions, literals: Record<string, string>): string {
+  const sections = validateProcedure(options);
+  // Discover structural boundaries only in the fixed template. A client value may
+  // legitimately contain a newline followed by a line resembling a block marker.
+  const blocks = [...SCRIPT_TEMPLATE.matchAll(/^# --- (\d+)\. /gm)].map(match => ({number: Number(match[1]), start: match.index}));
+  const manualStart = SCRIPT_TEMPLATE.indexOf('# --- Points manuels');
+  const reportStart = SCRIPT_TEMPLATE.indexOf('# ============================ RAPPORT');
+  const render = (fragment: string) => fragment.replace(/__CLIENT__|__PREFIX__|__ADMIN__|__KEYBOARDS__|__PRINTER__|__APPS__/g, key => literals[key]);
+  const header = render(SCRIPT_TEMPLATE.slice(0, blocks[0].start));
+  let checks = '';
+  let applicable = 0;
+  const mappedBlocks = new Set<number>();
+  const technicalProbe = (number: number, index: number) => {
+    const probe = render(SCRIPT_TEMPLATE.slice(blocks[index].start, blocks[index + 1]?.start ?? manualStart));
+    const missing = number === 5 ? ["[string]::IsNullOrWhiteSpace($Config.AdminLocal)", 'Compte administrateur local', 'Compte administrateur du client non défini'] :
+      number === 8 ? ["@($Config.Keyboards | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0", 'Clavier attendu', 'Aucun clavier configuré'] :
+      number === 10 ? ["[string]::IsNullOrWhiteSpace($Config.PrinterName)", 'Imprimante du client', "Motif de l'imprimante du client non défini"] :
+      number === 7 ? ["@($Config.Apps | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0", 'Applications configurées', 'Aucune application configurée'] : undefined;
+    return missing ? `if (${missing[0]}) { Add-Check 'Contrôles techniques supplémentaires' ${psLiteral(missing[1])} 'A VERIFIER' ${psLiteral(missing[2])} } else {\n${probe}}\n` : probe;
+  };
+  for (const section of sections) {
+    const included = section.steps.filter(step => step.etat !== 'na');
+    applicable += included.length;
+    if (!included.length) {
+      // A dossier section whose steps are all N/A is outside the audit scope.
+      if (section.steps.length === 0) checks += `Add-Check ${psLiteral(section.title)} 'Aucune étape définie' 'A VERIFIER' 'Section à valider manuellement'\n`;
+      continue;
+    }
+    for (const step of included) {
+      const mapped = Object.prototype.hasOwnProperty.call(STANDARD_PROBES, step.id) ? STANDARD_PROBES[step.id] : undefined;
+      const block = mapped?.title === step.title && !(step.id === 'bz-1-4' && options.adminLocal !== 'bzinc') &&
+        !(step.id === 'bz-2-7' && !options.printerName.trim()) ? mapped.block : undefined;
+      const note = [step.note, step.commentaire || ''].filter(Boolean).join(' ; ');
+      if (block === undefined) {
+        checks += `Add-Check ${psLiteral(section.title)} ${psLiteral(step.title)} 'A VERIFIER' ${psLiteral(['Validation manuelle requise', note].filter(Boolean).join(' — '))}\n`;
+        continue;
+      }
+      const index = blocks.findIndex(item => item.number === block);
+      if (index < 0) throw new Error('Bloc de contrôle de procédure absent');
+      mappedBlocks.add(block);
+      checks += `# Contrôle standard ${step.id}\n$before = $script:Resultats.Count\n`;
+      if (note.trim()) checks += '$script:ManualStepRequiresVerification = $true\n';
+      checks += technicalProbe(block, index);
+      if (note.trim()) checks += '$script:ManualStepRequiresVerification = $false\n';
+      checks += `foreach ($row in @($script:Resultats | Select-Object -Skip $before)) {\n`;
+      checks += `    $row.Categorie = ${psLiteral(section.title)}\n    $row.Nom = ${psLiteral(step.title)}\n`;
+      checks += `    $row.Detail = (@($row.Detail, ${psLiteral(note)}) | Where-Object { $_ }) -join ' — '\n`;
+      checks += `}\n`;
+      checks += `if ($script:Resultats.Count -eq $before) { Add-Check ${psLiteral(section.title)} ${psLiteral(step.title)} 'A VERIFIER' ${psLiteral(['Contrôle indisponible', note].filter(Boolean).join(' — '))} }\n`;
+    }
+  }
+  if (!applicable) checks += "Add-Check 'Procédure' 'Aucune étape applicable' 'A VERIFIER' 'Aucune étape sélectionnée ne permet de valider le poste'\n";
+  // Client settings are supplementary technical evidence, never validation of a procedure step.
+  for (const number of [2, 5, 7, 8, 10]) {
+    if (mappedBlocks.has(number)) continue;
+    const index = blocks.findIndex(item => item.number === number);
+    if (index < 0) throw new Error('Bloc de contrôle client absent');
+    checks += `# Contrôles techniques supplémentaires — ${number}\n$technicalBefore = $script:Resultats.Count\n`;
+    checks += technicalProbe(number, index);
+    checks += "foreach ($row in @($script:Resultats | Select-Object -Skip $technicalBefore)) { $row.Categorie = 'Contrôles techniques supplémentaires' }\n";
+  }
+  // No generic BZ checklist in procedure mode: each selected step already has its own report row.
+  let report = '$Manuels = @()\n\n' + render(SCRIPT_TEMPLATE.slice(reportStart));
+  report = report.replace("<div class='band'><div class='logo'>BZ</div>", "<div class='band'><div class='logo'>Audit</div>");
+  report = report.replace('Client : $(HtmlEnc $Config.ClientName)<br>', 'Client : $(HtmlEnc $Config.ClientName)<br>Procédure : $(HtmlEnc $ProcedureName)<br>$(if ($ProcedureSource) { "Source : $(HtmlEnc $ProcedureSource)<br>" })');
+  report = report.replace('Audit de montage de poste — BZ v1 · généré automatiquement', 'Audit de montage de poste · $(HtmlEnc $ProcedureName) · généré automatiquement');
+  report = report.replace('<h2>Points à valider manuellement</h2><ul>$manuelLis</ul>', '');
+  return header.replace('v1 — BZ.', 'procédure sélectionnée.') + `$ProcedureName = ${psLiteral(options.procedure!.name)}\n$ProcedureSource = ${psLiteral(options.procedure!.source || '')}\n\n` + checks + report;
+}
+
 export function generateWorkstationAuditScript(options: WorkstationAuditOptions = DEFAULT_WORKSTATION_AUDIT_OPTIONS): string {
   const literals: Record<string, string> = {
     __CLIENT__: psLiteral(options.clientName),
@@ -347,5 +453,6 @@ export function generateWorkstationAuditScript(options: WorkstationAuditOptions 
     __PRINTER__: psLiteral(options.printerName),
     __APPS__: psArray(options.apps),
   };
+  if (options.procedure !== undefined) return procedureScript(options, literals);
   return SCRIPT_TEMPLATE.replace(/__CLIENT__|__PREFIX__|__ADMIN__|__KEYBOARDS__|__PRINTER__|__APPS__/g, key => literals[key]);
 }

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 
 import * as db from './database/index.js';
+import * as workstation from './database/workstation-procedures.js';
 import * as auth from './auth.js';
 import * as mfa from './mfa-service.js';
 import { loadActiveServoClients } from './servo-clients.js';
@@ -340,6 +341,8 @@ function workstationRoute(fn,status=200){return async(req,res)=>{
   try {res.status(status).json(await fn(req));}
   catch(error){if([400,403,404,409].includes(error.statusCode))return res.status(error.statusCode).json({error:error.message});handleError(res,error,'Erreur procédure de poste');}
 };}
+app.get('/api/workstation-procedures/audit-source',auth.requireAuth,workstationRoute(async req=>workstation.auditSource(await db.initDb(),req.auth,req.query)));
+app.get('/api/workstation-procedures/audit-source/dossier/:id',auth.requireAuth,workstationRoute(async req=>workstation.auditDossierSource(await db.initDb(),req.auth,req.params.id)));
 app.get('/api/workstation-procedures/templates',auth.requireAuth,workstationRoute(req=>db.listWorkstationTemplates(req.auth,req.query)));
 app.get('/api/workstation-procedures/templates/standard',auth.requireAuth,workstationRoute(()=>db.standardWorkstationTemplate()));
 app.get('/api/workstation-procedures/templates/by-request/:requestKey',auth.requireAuth,workstationRoute(req=>db.reconcileWorkstationTemplate(req.auth,req.params.requestKey)));

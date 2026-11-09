@@ -30,12 +30,14 @@ function fixture({dossiers=[],templates=[template],putStatus=200,browserRouter=f
     const method=options.method||'GET'; const body=options.body&&JSON.parse(options.body);
     requests.push({url,method,body});
     const custom=override?.({url,method,body,requests});if(custom!==undefined)return custom;
-    if(url==='/api/clients')return Response.json({clients:[{id:2,nom:'Acme TI',clientType:'ti'},{id:4,nom:'Télécom',clientType:'telecom'}]});
+    if(url==='/api/clients')return Response.json({clients:[{id:2,nom:'Acme TI',clientType:'ti',primeId:1},{id:4,nom:'Télécom',clientType:'telecom',primeId:1},{id:5,nom:'À classer',clientType:null,primeId:1},{id:6,nom:'Sans Prime',clientType:'ti',primeId:null}]});
     if(url==='/api/workstation-procedures/templates/standard')return Response.json({template});
+    if(url.startsWith('/api/workstation-procedures/audit-source?'))return Response.json({client:{id:2,nom:'Acme TI'},template});
     if(url==='/api/workstation-procedures/templates'&&method==='GET')return Response.json({templates,hasMore:false,nextBefore:null});
     if(url==='/api/workstation-procedures/dossiers'&&method==='GET')return Response.json({dossiers,hasMore:false,nextBefore:null});
     if(url.includes('/by-request/'))return Response.json({[url.includes('/templates/')?'template':'dossier']:url.includes('/templates/')?template:dossier});
     if(url==='/api/workstation-procedures/dossiers'&&method==='POST')return Response.json({dossier:{...dossier,...body}},{status:201});
+    if(url==='/api/workstation-procedures/audit-source/dossier/11'&&method==='GET')return Response.json({dossier:dossiers.find(d=>d.id===11)||dossier});
     if(url==='/api/workstation-procedures/dossiers/11'&&method==='GET')return Response.json({dossier:dossiers.find(d=>d.id===11)||dossier});
     if(url==='/api/workstation-procedures/dossiers/11'&&method==='PUT')return putStatus===409?Response.json({error:'Conflit de version'},{status:409}):Response.json({dossier:{...dossier,...body,version:2}});
     if(url==='/api/workstation-procedures/dossiers/11/archive')return Response.json({dossier:{...dossier,archivedAt:'2026-11-10',version:2}});
@@ -63,6 +65,8 @@ test('Prime tools exposes the workstation editor route',async()=>{
 
 test('lists shared models and scoped TI clients, excluding telecom',async()=>{const f=fixture();try{await f.render();assert.match(f.dom.window.document.body.textContent,/Standard Windows/);assert.match(f.dom.window.document.body.textContent,/Acme TI/);assert.doesNotMatch(f.dom.window.document.querySelector('select[aria-label="Client"]')?.textContent??'',/Télécom/);}finally{await f.cleanup();}});
 
+test('assigned but unclassified clients appear disabled until classified TI, without telecom or unassigned clients',async()=>{const f=fixture();try{await f.render();const select=f.dom.window.document.querySelector('select[aria-label="Client"]');const options=[...select.options];assert.equal(options.find(o=>o.textContent.includes('Acme TI'))?.disabled,false);const pending=options.find(o=>o.textContent.includes('À classer'));assert.ok(pending,'assigned unclassified client should be visible');assert.equal(pending.disabled,true);assert.match(pending.textContent,/classer TI/i);assert.ok(!options.some(o=>o.textContent.includes('Télécom')||o.textContent.includes('Sans Prime')));}finally{await f.cleanup();}});
+
 test('creates a dossier from a model and saves step state, notes and metadata with version',async()=>{const f=fixture();try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Employé','Alice');await f.input('Ordinateur','PC-1');await f.click('Créer le dossier');assert.equal(f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/dossiers')).body.clientId,2);await f.input('État — Clavier','fait');await f.input('Commentaire — Clavier','Vérifié');await f.click('Sauvegarder le dossier');const put=f.requests.find(r=>r.method==='PUT');assert.equal(put.body.expectedVersion,1);assert.equal(put.body.sections[0].steps[0].commentaire,'Vérifié');assert.match(f.dom.window.document.body.textContent,/1 \/ 1/);}finally{await f.cleanup();}});
 
 test('a version conflict preserves unsaved edits',async()=>{const f=fixture({dossiers:[dossier],putStatus:409});try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','Important');await f.click('Sauvegarder le dossier');assert.match(f.dom.window.document.querySelector('[role="alert"]').textContent,/Conflit/);assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]').value,'Important');}finally{await f.cleanup();}});
@@ -79,7 +83,97 @@ test('unsaved workstation edits veto sidebar logout',async()=>{const f=fixture({
 
 test('unfinished new dossier metadata blocks navigation',async()=>{const f=fixture();try{await f.render();await f.input('Employé','Brouillon');f.dom.window.confirm=()=>false;const anchor=f.dom.window.document.createElement('a');anchor.href='/clients';f.dom.window.document.body.append(anchor);const event=new f.dom.window.MouseEvent('click',{bubbles:true,cancelable:true});anchor.dispatchEvent(event);assert.equal(event.defaultPrevented,true);assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]').value,'Brouillon');}finally{await f.cleanup();}});
 
-test('script panel passes client-specific audit settings to generator',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};const oldClick=f.dom.window.HTMLAnchorElement.prototype.click;f.dom.window.HTMLAnchorElement.prototype.click=function(){globalThis.__downloadName=this.download;};try{await f.render();await f.input('Client','2');await f.input('Préfixe du client','ACME-');await f.input('Compte administrateur','local-admin');await f.input('Clavier attendu','fr-CA, en-US');await f.input('Motif de l’imprimante','Bureau');await f.input('Applications attendues','Office\nChrome');await f.click('Télécharger le script .ps1');assert.deepEqual(globalThis.__scriptConfig,{clientName:'Acme TI',computerPrefix:'ACME-',adminLocal:'local-admin',keyboards:['fr-CA','en-US'],printerName:'Bureau',apps:['Office','Chrome']});assert.equal(globalThis.__downloadName,'audit-poste-windows.ps1');}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
+test('printer motif label warns that an empty value requires verification, not any printer',async()=>{const f=fixture();try{await f.render();const label=f.dom.window.document.querySelector('input[aria-label="Motif de l’imprimante"]')?.closest('label')?.textContent||'';assert.match(label,/vide = à vérifier/i);assert.doesNotMatch(label,/vide = toute imprimante/i);}finally{await f.cleanup();}});
+
+test('audit download requires a client and its selected procedure',async()=>{const f=fixture();const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.click('Télécharger le script .ps1');assert.equal(downloads,0);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));assert.match(f.dom.window.document.body.textContent,/Choisissez.*client.*modèle/i);}finally{URL.createObjectURL=oldCreate;await f.cleanup();}});
+
+test('audit uses an authoritative selected client and template instead of generic BZ defaults',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));assert.equal(globalThis.__scriptConfig.clientName,'Acme TI');assert.equal(globalThis.__scriptConfig.procedure.name,'Standard Windows');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,template.sections);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
+
+test('denied or malformed audit source never falls back to a generic client script',async()=>{for(const answer of [Response.json({error:'Introuvable'},{status:404}),Response.json({client:{id:4,nom:'Autre client'},template})]){const f=fixture({override:({url})=>url.includes('/audit-source?')?answer:undefined});const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.equal(downloads,0);assert.ok(f.dom.window.document.querySelector('[role="alert"]'));}finally{URL.createObjectURL=oldCreate;await f.cleanup();}}});
+
+test('audit uses the assignment-scoped saved dossier snapshot even when the creation form has no model selected',async()=>{const f=fixture({dossiers:[dossier]});const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.click('Télécharger le script .ps1');assert.equal(f.requests.filter(r=>r.url==='/api/workstation-procedures/dossiers/11').length,1);assert.deepEqual(f.requests.filter(r=>r.url==='/api/workstation-procedures/audit-source/dossier/11').map(r=>r.method),['GET']);assert.equal(globalThis.__scriptConfig.clientName,'Acme TI');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,dossier.sections);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
+
+test('denied saved-dossier audit does not fall back to historical read or create a Blob',async()=>{for(const status of [403,404]){const f=fixture({dossiers:[dossier],override:({url})=>url==='/api/workstation-procedures/audit-source/dossier/11'?Response.json({error:'Dossier non attribué'},{status}):undefined});const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.click('Télécharger le script .ps1');assert.equal(downloads,0);assert.equal(f.requests.filter(r=>r.url==='/api/workstation-procedures/dossiers/11').length,1);assert.deepEqual(f.requests.filter(r=>r.url==='/api/workstation-procedures/audit-source/dossier/11').map(r=>r.method),['GET']);assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Dossier non attribué/);}finally{URL.createObjectURL=oldCreate;await f.cleanup();}}});
+
+test('invalid saved-dossier audit projection cannot fall back or create a Blob',async()=>{for(const payload of [{dossier:{...dossier,id:12}},{dossier:{id:11,version:1}},{...dossier}]){const f=fixture({dossiers:[dossier],override:({url})=>url==='/api/workstation-procedures/audit-source/dossier/11'?Response.json(payload):undefined});const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.click('Télécharger le script .ps1');assert.equal(downloads,0);assert.equal(f.requests.filter(r=>r.url==='/api/workstation-procedures/dossiers/11').length,1);assert.ok(f.dom.window.document.querySelector('[role="alert"]'));}finally{URL.createObjectURL=oldCreate;await f.cleanup();}}});
+
+test('audit refuses a dossier changed on the server instead of mixing procedure versions',async()=>{let reads=0;const f=fixture({dossiers:[dossier],override:({url,method})=>url==='/api/workstation-procedures/dossiers/11'&&method==='GET'?(reads++,Response.json({dossier})):url==='/api/workstation-procedures/audit-source/dossier/11'?Response.json({dossier:{...dossier,version:2}}):undefined});const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.click('Télécharger le script .ps1');assert.equal(reads,1);assert.equal(downloads,0);assert.match(f.dom.window.document.body.textContent,/modifié.*rechargez/i);}finally{URL.createObjectURL=oldCreate;await f.cleanup();}});
+
+test('unsaved dossier edits block an audit download without losing the edit',async()=>{const f=fixture({dossiers:[dossier]});const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','À sauvegarder');await f.click('Télécharger le script .ps1');assert.equal(downloads,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]').value,'À sauvegarder');assert.match(f.dom.window.document.body.textContent,/Sauvegardez.*dossier/i);}finally{URL.createObjectURL=oldCreate;await f.cleanup();}});
+
+test('changing the creation model while audit-source is pending never downloads the old script',async()=>{
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  const alternate={...template,id:8,name:'Other Windows'};
+  const f=fixture({templates:[template,alternate],override:({url})=>url.includes('/audit-source?')?gate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
+  const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
+  try{
+    await f.render();await f.input('Client','2');await f.input('Modèle','3');
+    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger le script .ps1').click());
+    assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));
+    await f.input('Modèle','8');await act(async()=>release());
+    assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'8');
+    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Script généré/);
+  }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
+});
+
+test('changing the creation client while audit-source is pending never downloads the old script',async()=>{
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  const f=fixture({override:({url})=>url.includes('/audit-source?')?gate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
+  const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
+  try{
+    await f.render();await f.input('Client','2');await f.input('Modèle','3');
+    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger le script .ps1').click());
+    assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));
+    await f.input('Client','');await act(async()=>release());
+    assert.equal(f.dom.window.document.querySelector('[aria-label="Client"]').value,'');
+    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Script généré/);
+  }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
+});
+
+test('changing generator prefix during audit-source fetch preserves the edit and skips the stale template download',async()=>{
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  const f=fixture({override:({url})=>url.includes('/audit-source?')?gate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
+  const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
+  try{
+    await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Préfixe du client','OLD-');
+    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger le script .ps1').click());
+    assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));
+    await f.input('Préfixe du client','NEW-');await act(async()=>release());
+    assert.equal(f.dom.window.document.querySelector('[aria-label="Préfixe du client"]').value,'NEW-');
+    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Script généré/);
+  }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
+});
+
+test('changing generator applications during dossier recheck preserves the edit and skips the stale dossier download',async()=>{
+  let release;const gate=new Promise(resolve=>{release=resolve;});let reads=0;
+  const f=fixture({dossiers:[dossier],override:({url,method})=>url==='/api/workstation-procedures/dossiers/11'&&method==='GET'?(reads++,Response.json({dossier})):url==='/api/workstation-procedures/audit-source/dossier/11'?(reads++,gate.then(()=>Response.json({dossier}))):undefined});
+  const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
+  try{
+    await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Applications attendues','Old app');
+    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger le script .ps1').click());
+    assert.equal(reads,2);
+    await f.input('Applications attendues','New app');await act(async()=>release());
+    assert.equal(f.dom.window.document.querySelector('[aria-label="Applications attendues"]').value,'New app');
+    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Script généré/);
+  }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
+});
+
+test('unsaved procedure-model edits block audit export without discarding edits',async()=>{
+  const f=fixture();const oldCreate=URL.createObjectURL;let downloads=0;
+  URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
+  try{
+    await f.render();await f.input('Client','2');await f.input('Modèle','3');
+    f.dom.window.confirm=()=>true;
+    await f.click('Standard Windows · Global');await f.input('Titre étape 1.1','Clavier modifié non sauvegardé');
+    await f.click('Télécharger le script .ps1');
+    assert.equal(downloads,0);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));
+    assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Sauvegardez.*modèle.*(annulez|rouvr)/i);
+    assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'Clavier modifié non sauvegardé');
+    assert.equal([...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Sauvegarder le modèle').disabled,false);
+  }finally{URL.createObjectURL=oldCreate;await f.cleanup();}
+});
+
+test('script panel passes client-specific audit settings to generator',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};const oldClick=f.dom.window.HTMLAnchorElement.prototype.click;f.dom.window.HTMLAnchorElement.prototype.click=function(){globalThis.__downloadName=this.download;};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Préfixe du client','ACME-');await f.input('Compte administrateur','local-admin');await f.input('Clavier attendu','fr-CA, en-US');await f.input('Motif de l’imprimante','Bureau');await f.input('Applications attendues','Office\nChrome');await f.click('Télécharger le script .ps1');assert.equal(globalThis.__scriptConfig.clientName,'Acme TI');assert.equal(globalThis.__scriptConfig.computerPrefix,'ACME-');assert.equal(globalThis.__scriptConfig.adminLocal,'local-admin');assert.deepEqual(globalThis.__scriptConfig.keyboards,['fr-CA','en-US']);assert.equal(globalThis.__scriptConfig.printerName,'Bureau');assert.deepEqual(globalThis.__scriptConfig.apps,['Office','Chrome']);assert.deepEqual(globalThis.__scriptConfig.procedure.sections,template.sections);assert.equal(globalThis.__downloadName,'audit-poste-windows.ps1');}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
 
 test('Prime cannot edit global template but can create a client-scoped model',async()=>{globalThis.__workstationRole='user';const f=fixture();try{await f.render();assert.ok(![...f.dom.window.document.querySelectorAll('button')].some(b=>b.textContent.includes('Standard Windows · Global')));await f.click('Nouveau modèle');const scope=f.dom.window.document.querySelector('[aria-label="Client du modèle"]');assert.ok(scope);assert.ok(![...scope.options].some(o=>o.value===''));await f.input('Client du modèle','2');await f.input('Nom du modèle','Client Windows');await f.click('Ajouter une section');await f.input('Titre de section 1','Installation');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','Imprimante');await f.click('Sauvegarder le modèle');assert.equal(f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/templates')).body.clientId,2);}finally{globalThis.__workstationRole='admin';await f.cleanup();}});
 
@@ -87,7 +181,7 @@ test('Prime duplicates the global standard into an explicitly selected TI client
 
 test('unfinished creation metadata is guarded when switching editors',async()=>{const f=fixture();try{await f.render();await f.input('Employé','À conserver');f.dom.window.confirm=()=>false;await f.click('Nouveau modèle');assert.ok(!f.dom.window.document.querySelector('[aria-label="Nom du modèle"]'));assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]').value,'À conserver');}finally{await f.cleanup();}});
 
-test('PowerShell download starts with a UTF-8 BOM before script text',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.click('Télécharger le script .ps1');assert.ok(blob);const bytes=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(new Uint8Array(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsArrayBuffer(blob);});assert.deepEqual([...bytes].slice(0,6),[0xef,0xbb,0xbf,0x23,0x20,0x54]);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
+test('PowerShell download starts with a UTF-8 BOM before script text',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.ok(blob);const bytes=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(new Uint8Array(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsArrayBuffer(blob);});assert.deepEqual([...bytes].slice(0,6),[0xef,0xbb,0xbf,0x23,0x20,0x54]);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
 
 test('BrowserRouter back and forward recovers unsaved dossier edits after route unmount',async()=>{const f=fixture({dossiers:[dossier],browserRouter:true});try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','À conserver');f.dom.window.confirm=()=>true;await act(async()=>f.dom.window.document.querySelector('nav a').click());assert.match(f.dom.window.document.body.textContent,/Page clients/);await act(async()=>{f.dom.window.history.back();await new Promise(resolve=>setTimeout(resolve,30));});assert.equal(f.dom.window.location.pathname,'/procedures/installation-postes');assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]')?.value,'À conserver');await act(async()=>{f.dom.window.history.forward();await new Promise(resolve=>setTimeout(resolve,30));});assert.match(f.dom.window.document.body.textContent,/Page clients/);await act(async()=>{f.dom.window.history.back();await new Promise(resolve=>setTimeout(resolve,30));});assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]')?.value,'À conserver');}finally{await f.cleanup();}});
 

@@ -4,8 +4,8 @@ import { Card } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { generateWorkstationAuditScript, DEFAULT_WORKSTATION_AUDIT_OPTIONS } from '../services/workstationAuditScript';
 import {
-  archiveDossier, createDossier, createTemplate, getDossier, getDossierByRequest, getTemplateByRequest, getStandardTemplate, listDossiers, listTemplates, listTiClients,
-  ProcedureApiError, updateDossier, updateTemplate,
+  archiveDossier, createDossier, createTemplate, getDossier, getDossierByRequest, getTemplateByRequest, getStandardTemplate, listDossiers, listTemplates,
+  ProcedureApiError, updateDossier, updateTemplate, listWorkstationClients, getAuditTemplateSource, getAuditDossierSource,
   type WorkstationDossier, type WorkstationTemplate, type TemplateSection, type DossierSection,
 } from '../services/workstationProcedures';
 import type { ClientPrime } from '../services/dataService';
@@ -64,6 +64,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
   // Reconciliation owns the editor only until a person selects or edits another one.
   const editorRevision = useRef(0);
   const creationRevision = useRef(0);
+  const scriptRevision = useRef(0);
   const editorState = useRef({ dirty, modelDirty, creationDirty });
   editorState.current = { dirty, modelDirty, creationDirty };
   const confirmLeave = () => (!dirty && !modelDirty && !creationDirty) || window.confirm('Des modifications non sauvegardées seront perdues. Continuer ?');
@@ -76,7 +77,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
   useEffect(() => {
     let active = true;
     const failed=(e:unknown)=>{if(active)setError(message(e));};
-    void listTiClients().then(c=>{if(active)setClients(c);}).catch(failed);
+    void listWorkstationClients().then(c=>{if(active)setClients(c);}).catch(failed);
     void listTemplates().then(t=>{if(active){setTemplates(items=>mergeById(items,t.items));setTemplateBefore(t.nextBefore);}}).catch(failed);
     void getStandardTemplate().then(standard=>{if(active)setTemplates(items=>mergeById(items,[standard]));}).catch(failed);
     void listDossiers().then(d=>{if(active){setDossiers(items=>mergeById(d.items,items));setDossierBefore(d.nextBefore);}}).catch(failed);
@@ -204,7 +205,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     const saved = await updateTemplate(model.id, { name: model.name, sections: model.sections, expectedVersion: model.version });
     setTemplates(items => [...items.filter(i => i.id !== saved.id), saved]); setModel(copy(saved)); setModelDirty(false); setDuplicating(false); setNotice('Modèle sauvegardé. Les dossiers déjà créés ne sont pas modifiés.');
   }); };
-  const create = () => { if (!creation.clientId || !creation.templateId) { setError('Choisissez un client TI et un modèle.'); return; }
+  const create = () => { if (!creation.clientId || !creation.templateId || !clients.some(c => String(c.id) === creation.clientId && c.clientType === 'ti')) { setError('Choisissez un client attribué et classé TI, puis un modèle.'); return; }
     if ((dirty || modelDirty) && !window.confirm('Des modifications non sauvegardées seront perdues. Continuer ?')) return;
     void run(async () => {
       await executeIntent({kind:'dossier',payload:{requestKey:crypto.randomUUID(),clientId:Number(creation.clientId),templateId:Number(creation.templateId),employee:creation.employee,computer:creation.computer,ticket:creation.ticket,date:creation.date}});
@@ -215,13 +216,48 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
   };
   const clientTemplates = templates.filter(t => t.clientId === null || String(t.clientId) === creation.clientId);
   const progress = draft ? draft.sections.flatMap(s => s.steps).reduce((v, step) => ({ done: v.done + Number(step.etat === 'fait'), total: v.total + Number(step.etat !== 'na') }), { done: 0, total: 0 }) : null;
+  const updateScript = (key: keyof typeof script, value: string) => { scriptRevision.current++; setScript(current => ({ ...current, [key]: value })); };
   const downloadScript = () => {
-    try {
-      const result = generateWorkstationAuditScript({ clientName: draft?.clientName || clients.find(c => String(c.id) === creation.clientId)?.nom || DEFAULT_WORKSTATION_AUDIT_OPTIONS.clientName, computerPrefix: script.prefix, adminLocal: script.admin, keyboards: script.keyboard.split(',').map(v => v.trim()).filter(Boolean), printerName: script.printer, apps: script.apps.split('\n').map(v => v.trim()).filter(Boolean) });
-      const text = typeof result === 'string' ? result : String(result);
+    if (locked.current) return;
+    if (draft && dirty) { setError('Sauvegardez le dossier avant de générer son audit.'); return; }
+    if (!draft && modelDirty) { setError('Sauvegardez le modèle ou annulez vos modifications en rouvrant le modèle avant de générer le script.'); return; }
+    if (pending || pendingInvalid) { setError('Confirmez la création en attente avant de générer son audit.'); return; }
+    const selectedClient = clients.find(c => String(c.id) === creation.clientId && c.clientType === 'ti');
+    const selectedTemplate = templates.find(t => String(t.id) === creation.templateId);
+    if (!draft && (!selectedClient || !selectedTemplate)) { setError('Choisissez un client TI et son modèle pour générer le script.'); return; }
+    const selectionRevision = requestId.current;
+    const creationAtStart = creationRevision.current;
+    const scriptAtStart = scriptRevision.current;
+    const settings = { ...script };
+    void run(async () => {
+      let clientName: string;
+      let procedure: { name: string; sections: TemplateSection[] | DossierSection[] };
+      if (draft) {
+        const fresh = await getAuditDossierSource(draft.id); // Recheck assignment and the saved snapshot before download.
+        if (selectionRevision !== requestId.current || scriptAtStart !== scriptRevision.current) return;
+        if (fresh.id !== draft.id || fresh.clientId !== draft.clientId || fresh.version !== draft.version || JSON.stringify(fresh.sections) !== JSON.stringify(draft.sections)) {
+          throw new Error('Dossier modifié depuis son ouverture : rechargez-le avant de générer le script.');
+        }
+        if (!fresh.clientName.trim()) throw new Error('Client du dossier introuvable');
+        clientName = fresh.clientName;
+        procedure = { name: `Dossier d’installation — ${fresh.employee || fresh.computer || 'poste'}`, sections: fresh.sections };
+      } else {
+        const source = await getAuditTemplateSource(selectedClient!.id, selectedTemplate!.id);
+        if (selectionRevision !== requestId.current || creationAtStart !== creationRevision.current || scriptAtStart !== scriptRevision.current) return;
+        clientName = source.client.nom;
+        procedure = { name: source.template.name, sections: source.template.sections };
+      }
+      const text = generateWorkstationAuditScript({
+        clientName, computerPrefix: settings.prefix, adminLocal: settings.admin,
+        keyboards: settings.keyboard.split(',').map(v => v.trim()).filter(Boolean),
+        printerName: settings.printer, apps: settings.apps.split('\n').map(v => v.trim()).filter(Boolean),
+        procedure,
+      });
+      if (selectionRevision !== requestId.current || (!draft && creationAtStart !== creationRevision.current) || scriptAtStart !== scriptRevision.current) return;
       const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
       const a = document.createElement('a'); a.href = url; a.download = 'audit-poste-windows.ps1'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (e) { setError(message(e)); }
+      setNotice(`Script généré pour ${clientName} selon ${procedure.name}.`);
+    });
   };
   return <Page>
     <style data-workstation-print>{`@media print {
@@ -241,12 +277,12 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     <div className="grid gap-5 lg:grid-cols-2 print:hidden">
       <Card><fieldset disabled={busy}><h2 className="mb-3 text-lg font-semibold text-white">Nouveau dossier</h2>
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="text-sm text-slate-300">Client<select aria-label="Client" className={inputClass} value={creation.clientId} onChange={e => {creationRevision.current++;setCreation({ ...creation, clientId: e.target.value, templateId: '' });}}><option value="">Choisir</option>{clients.map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}</select></label>
+          <label className="text-sm text-slate-300">Client<select aria-label="Client" className={inputClass} value={creation.clientId} onChange={e => {creationRevision.current++;setCreation({ ...creation, clientId: e.target.value, templateId: '' });}}><option value="">Choisir</option>{clients.map(c => <option key={c.id} value={c.id} disabled={c.clientType !== 'ti'}>{c.nom}{c.clientType === 'ti' ? '' : ' — À classer TI dans Clients'}</option>)}</select></label>
           <label className="text-sm text-slate-300">Modèle<select aria-label="Modèle" className={inputClass} value={creation.templateId} onChange={e => {creationRevision.current++;setCreation({ ...creation, templateId: e.target.value });}}><option value="">Choisir</option>{clientTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
           {(['employee', 'computer', 'ticket', 'date'] as const).map((key) => <label key={key} className="text-sm text-slate-300">{{ employee: 'Employé', computer: 'Ordinateur', ticket: 'Billet', date: 'Date' }[key]}<input aria-label={{ employee: 'Employé', computer: 'Ordinateur', ticket: 'Billet', date: 'Date' }[key]} type={key === 'date' ? 'date' : 'text'} className={inputClass} value={creation[key]} onChange={e => {creationRevision.current++;setCreation({ ...creation, [key]: e.target.value });}} /></label>)}
-        </div><button disabled={busy||!!pending||pendingInvalid} className={`${buttonClass} mt-4`} onClick={create}>Créer le dossier</button></fieldset>
+        </div>{clients.some(c => c.clientType !== 'ti') && <p className="mt-3 text-sm text-amber-300">Les clients non classés sont visibles, mais un administrateur doit les classer TI dans « Clients » avant leur sélection.</p>}<button disabled={busy||!!pending||pendingInvalid} className={`${buttonClass} mt-4`} onClick={create}>Créer le dossier</button></fieldset>
       </Card>
-      <Card><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold text-white">Modèles de procédure</h2><button className={buttonClass} disabled={busy} onClick={() => { if (!confirmLeave()) return; editorRevision.current++;setModel({ id: 0, clientId: isAdmin ? null : clients[0]?.id ?? null, name: '', version: 0, sections: [] }); setDuplicating(false); setDraft(null); setDirty(false); setModelDirty(false); }}>Nouveau modèle</button></div>
+      <Card><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold text-white">Modèles de procédure</h2><button className={buttonClass} disabled={busy} onClick={() => { if (!confirmLeave()) return; editorRevision.current++;setModel({ id: 0, clientId: isAdmin ? null : (clients.find(c => c.clientType === 'ti')?.id ?? null), name: '', version: 0, sections: [] }); setDuplicating(false); setDraft(null); setDirty(false); setModelDirty(false); }}>Nouveau modèle</button></div>
         <p className="mb-3 text-xs text-slate-400">Modèles globaux ou propres à un client TI. Modifier un modèle ne change jamais les dossiers existants.</p>
         <div className="space-y-2">{templates.map(t => <div key={t.id} className="flex flex-wrap gap-2">{(isAdmin || t.clientId !== null) && <button className={`${buttonClass} min-w-0 flex-1 text-left`} disabled={busy} onClick={() => { if (!confirmLeave()) return; requestId.current++;editorRevision.current++; setModel(copy(t)); setDuplicating(false); setDraft(null); setDirty(false); setModelDirty(false); }}>{t.name} · {t.clientId == null ? 'Global' : clients.find(c => c.id === t.clientId)?.nom || 'Client TI'}</button>}{t.clientId === null && <button className={buttonClass} disabled={busy} onClick={() => { if (!confirmLeave()) return; requestId.current++;editorRevision.current++; setModel({ ...copy(t), id: 0, clientId: null, version: 0 }); setDuplicating(true); setDraft(null); setDirty(false); setModelDirty(true); }}>Dupliquer pour un client · {t.name}</button>}</div>)}</div>{templateBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('template')}>Charger plus de modèles</button>}
       </Card>
@@ -254,7 +290,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     <Card className="my-5 print:hidden"><h2 className="mb-3 text-lg font-semibold text-white">Dossiers partagés</h2><div className="grid gap-2 sm:grid-cols-2">{dossiers.map(d => <button key={d.id} disabled={busy} className={`${buttonClass} text-left`} onClick={() => openDossier(d.id)}>Ouvrir {d.employee || `dossier ${d.id}`} · {d.clientName}{d.archivedAt ? ' · Archivé' : ''}</button>)}</div>{dossierBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('dossier')}>Charger plus de dossiers</button>}</Card>
     {model && <Card className="my-5 print:hidden"><fieldset disabled={busy}><h2 className="mb-4 text-lg font-semibold text-white">Éditeur de modèle</h2>
       <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm text-slate-300">Nom du modèle<input aria-label="Nom du modèle" className={inputClass} value={model.name} onChange={e => mutateModel(t => { t.name = e.target.value; })} /></label>
-      {!model.id && <label className="text-sm text-slate-300">Portée<select aria-label="Client du modèle" className={inputClass} value={model.clientId ?? ''} onChange={e => mutateModel(t => { t.clientId = e.target.value ? Number(e.target.value) : null; })}>{duplicating && <option value="">Choisir un client TI</option>}{isAdmin && !duplicating && <option value="">Global</option>}{clients.map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}</select></label>}</div>
+      {!model.id && <label className="text-sm text-slate-300">Portée<select aria-label="Client du modèle" className={inputClass} value={model.clientId ?? ''} onChange={e => mutateModel(t => { t.clientId = e.target.value ? Number(e.target.value) : null; })}>{duplicating && <option value="">Choisir un client TI</option>}{isAdmin && !duplicating && <option value="">Global</option>}{clients.filter(c => c.clientType === 'ti').map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}</select></label>}</div>
       {model.sections.map((section, i) => <div key={i} className="mt-4 rounded-lg border border-white/10 p-3"><div className="flex gap-2"><input aria-label={`Titre de section ${i + 1}`} className={inputClass} placeholder="Titre de section" value={section.title} onChange={e => mutateModel(t => { t.sections[i].title = e.target.value; })} /><button className={buttonClass} onClick={() => mutateModel(t => { t.sections.splice(i, 1); })}>Retirer la section {i + 1}</button></div>
         {section.steps.map((step, j) => <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_1fr_auto]" key={step.id}><input aria-label={`Titre étape ${i + 1}.${j + 1}`} className={inputClass} placeholder="Étape" value={step.title} onChange={e => mutateModel(t => { t.sections[i].steps[j].title = e.target.value; })} /><input aria-label={`Note étape ${i + 1}.${j + 1}`} className={inputClass} placeholder="Note" value={step.note} onChange={e => mutateModel(t => { t.sections[i].steps[j].note = e.target.value; })} /><button className={buttonClass} onClick={() => mutateModel(t => { t.sections[i].steps.splice(j, 1); })}>Retirer l’étape</button></div>)}
         <button className={`${buttonClass} mt-2`} onClick={() => mutateModel(t => { t.sections[i].steps.push({ id: crypto.randomUUID(), title: '', note: '' }); })}>Ajouter une étape {i + 1}</button></div>)}
@@ -266,8 +302,10 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
       {!draft.archivedAt && <div className="flex flex-wrap gap-2 print:hidden"><button className={buttonClass} disabled={busy || !dirty} onClick={saveDossier}>Sauvegarder le dossier</button><button className={buttonClass} disabled={busy || dirty} onClick={archive}>Archiver le dossier</button></div>}
     </fieldset></Card>}
     <Card className="my-5 print:hidden"><h2 className="text-lg font-semibold text-white">Générateur de script d’audit Windows</h2><p className="my-2 text-sm text-amber-300">Le script valide uniquement des éléments du poste Windows. Installation, configuration et autres tâches manuelles restent à vérifier par le technicien. Aucun script n’est exécuté dans le navigateur ou sur le serveur.</p>
-      <div className="grid gap-3 sm:grid-cols-2">{(['prefix','admin','keyboard','printer','apps'] as const).map(key => <label className="text-sm text-slate-300" key={key}>{{prefix:'Préfixe du client',admin:'Compte administrateur',keyboard:'Clavier attendu',printer:'Motif de l’imprimante (ex. TOSHIBA; vide = toute imprimante)',apps:'Applications attendues (une par ligne)'}[key]}{key === 'apps' ? <textarea aria-label="Applications attendues" className={inputClass} value={script[key]} onChange={e => setScript({ ...script, [key]: e.target.value })} /> : <input aria-label={{prefix:'Préfixe du client',admin:'Compte administrateur',keyboard:'Clavier attendu',printer:'Motif de l’imprimante',apps:''}[key]} className={inputClass} value={script[key]} onChange={e => setScript({ ...script, [key]: e.target.value })} />}</label>)}</div>
-      <button className={`${buttonClass} mt-3`} onClick={downloadScript}>Télécharger le script .ps1</button>
+      <p role="status" className="my-2 text-sm text-slate-200">Source : {draft ? `dossier enregistré de ${draft.clientName} (procédure figée)` : `modèle ${templates.find(t => String(t.id) === creation.templateId)?.name ?? 'à choisir'} du client ${clients.find(c => String(c.id) === creation.clientId)?.nom ?? 'à choisir'}`}.</p>
+      <p className="my-2 text-xs text-amber-300">Les paramètres préremplis sont ceux de BZ : confirmez le préfixe, le compte, le clavier, l’imprimante et les applications pour ce client avant de télécharger. Les étapes non automatisables resteront à vérifier.</p>
+      <div className="grid gap-3 sm:grid-cols-2">{(['prefix','admin','keyboard','printer','apps'] as const).map(key => <label className="text-sm text-slate-300" key={key}>{{prefix:'Préfixe du client',admin:'Compte administrateur',keyboard:'Clavier attendu',printer:'Motif de l’imprimante (ex. TOSHIBA; vide = à vérifier)',apps:'Applications attendues (une par ligne)'}[key]}{key === 'apps' ? <textarea aria-label="Applications attendues" className={inputClass} value={script[key]} onChange={e => updateScript(key, e.target.value)} /> : <input aria-label={{prefix:'Préfixe du client',admin:'Compte administrateur',keyboard:'Clavier attendu',printer:'Motif de l’imprimante',apps:''}[key]} className={inputClass} value={script[key]} onChange={e => updateScript(key, e.target.value)} />}</label>)}</div>
+      <button className={`${buttonClass} mt-3`} disabled={busy} onClick={downloadScript}>Télécharger le script .ps1</button>
     </Card>
   </Page>;
 }

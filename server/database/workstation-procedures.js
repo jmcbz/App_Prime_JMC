@@ -68,6 +68,35 @@ async function run(driver,fn,write=false){
  const task=queue.then(()=>withSqliteOwner(async()=>{if(write)driver.sqlite.exec('BEGIN IMMEDIATE');try{const result=await fn(async(sql,params=[])=>{const stmt=driver.sqlite.prepare(sql);return stmt.reader?stmt.all(...params):[stmt.run(...params)];});if(write)driver.sqlite.exec('COMMIT');return result;}catch(e){if(write)driver.sqlite.exec('ROLLBACK');throw e;}}));queue=task.catch(()=>{});return task;
 }
 const one=async(q,sql,args=[])=>(await q(sql,args))[0];
+const parseAuditId=value=>typeof value==='string'&&/^[1-9]\d*$/.test(value)&&Number.isSafeInteger(Number(value))?Number(value):fail(400,'ID invalide');
+export async function auditSource(driver,actor,input){
+ const clientId=parseAuditId(input?.clientId),templateId=parseAuditId(input?.templateId);
+ return run(driver,async q=>{
+  const type=driver.kind==='pg'?"c.data->>'clientType'":"json_extract(c.data,'$.clientType')";
+  const row=await one(q,`SELECT c.id AS selected_client_id,c.data AS client_data,t.id,t.client_id,t.name,t.version,t.sections
+   FROM clients c JOIN workstation_templates t ON (t.client_id IS NULL OR t.client_id=c.id)
+   WHERE c.id=? AND t.id=? AND c.prime_id IS NOT NULL AND ${type}='ti'
+   AND (?='admin' OR EXISTS (SELECT 1 FROM prime_user_links l WHERE l.user_id=? AND l.prime_id=c.prime_id))`,
+   [clientId,templateId,actor.role,actor.sub]);
+  if(!row)fail(404,'Source introuvable');
+  const data=typeof row.client_data==='string'?JSON.parse(row.client_data):row.client_data;
+  return {client:{id:row.selected_client_id,nom:data.nom??''},template:template(row)};
+ });
+}
+export async function auditDossierSource(driver,actor,rawId){
+ const dossierId=parseAuditId(rawId);
+ return run(driver,async q=>{
+  const type=driver.kind==='pg'?"c.data->>'clientType'":"json_extract(c.data,'$.clientType')";
+  const row=await one(q,`SELECT d.*,c.data AS client_data FROM workstation_dossiers d
+   JOIN clients c ON c.id=d.client_id
+   WHERE d.id=? AND c.prime_id IS NOT NULL AND ${type}='ti'
+   AND (?='admin' OR EXISTS (SELECT 1 FROM prime_user_links l WHERE l.user_id=? AND l.prime_id=c.prime_id))`,
+   [dossierId,actor.role,actor.sub]);
+  if(!row)fail(404,'Source introuvable');
+  const data=typeof row.client_data==='string'?JSON.parse(row.client_data):row.client_data;
+  return {dossier:dossier({...row,client_name:data.nom??''})};
+ });
+}
 async function scope(q,actor,clientId,lock=false){const row=await one(q,`SELECT c.id,c.data,c.prime_id FROM clients c WHERE c.id=?${lock?' FOR UPDATE':''}`,[clientId]);if(!row)return false;const data=typeof row.data==='string'?JSON.parse(row.data):row.data;if(data.clientType!=='ti')return false;if(actor.role==='admin')return true;const link=await one(q,'SELECT prime_id FROM prime_user_links WHERE user_id=?',[actor.sub]);return !!link&&link.prime_id===row.prime_id;}
 async function visibleTemplate(q,actor,templateId,lock=false){let row=await one(q,'SELECT * FROM workstation_templates WHERE id=?',[templateId]);if(!row)return null;if(row.client_id!==null&&!await scope(q,actor,row.client_id,lock))return null;if(lock){row=await one(q,'SELECT * FROM workstation_templates WHERE id=? FOR UPDATE',[templateId]);if(!row||row.client_id!==null&&!await scope(q,actor,row.client_id))return null;}return row;}
 async function detailRow(q,id,actor,lock=false){let row=await one(q,'SELECT d.*,c.data AS client_data FROM workstation_dossiers d JOIN clients c ON c.id=d.client_id WHERE d.id=?',[id]);if(!row||!await scope(q,actor,row.client_id,lock))fail(404,'Dossier introuvable');if(lock){row=await one(q,'SELECT d.*,c.data AS client_data FROM workstation_dossiers d JOIN clients c ON c.id=d.client_id WHERE d.id=? FOR UPDATE OF d',[id]);if(!row||!await scope(q,actor,row.client_id))fail(404,'Dossier introuvable');}const data=typeof row.client_data==='string'?JSON.parse(row.client_data):row.client_data;return {...row,client_name:data.nom??''};}

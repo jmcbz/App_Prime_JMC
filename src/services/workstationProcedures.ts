@@ -54,13 +54,37 @@ export const updateTemplate = async (id: number, body: Pick<WorkstationTemplate,
 export const listDossiers = async (before?: number) => page<WorkstationDossier>(await request<Record<string, unknown>>(`/dossiers${before ? `?before=${before}` : ''}`), 'dossiers');
 export const getDossierByRequest = async (key: string) => unwrap(await request<{dossier:WorkstationDossier}>(`/dossiers/by-request/${encodeURIComponent(key)}`), 'dossier');
 export const getDossier = async (id: number) => unwrap(await request<WorkstationDossier | {dossier:WorkstationDossier}>(`/dossiers/${id}`), 'dossier');
+export async function getAuditDossierSource(id: number): Promise<WorkstationDossier> {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Identifiant du dossier invalide');
+  const data = await request<unknown>(`/audit-source/dossier/${id}`);
+  const dossier: WorkstationDossier | null = data && typeof data === 'object' && 'dossier' in data ? data.dossier as WorkstationDossier : null;
+  if (!dossier || !validDossier(dossier) || dossier.id !== id) {
+    throw new Error('Source du dossier invalide');
+  }
+  return dossier;
+}
 export const createDossier = async (body: { requestKey:string; clientId: number; templateId: number; employee: string; computer: string; ticket: string; date: string }) => unwrap(await request<{dossier:WorkstationDossier}>('/dossiers', 'POST', body), 'dossier');
 export const updateDossier = async (id: number, body: Pick<WorkstationDossier, 'employee' | 'computer' | 'ticket' | 'date' | 'sections'> & { expectedVersion: number }) => unwrap(await request<WorkstationDossier | {dossier:WorkstationDossier}>(`/dossiers/${id}`, 'PUT', body), 'dossier');
 export const archiveDossier = async (id: number, expectedVersion: number) => unwrap(await request<WorkstationDossier | {dossier:WorkstationDossier}>(`/dossiers/${id}/archive`, 'POST', { expectedVersion }), 'dossier');
-export async function listTiClients(): Promise<ClientPrime[]> {
+export async function getAuditTemplateSource(clientId: number, templateId: number): Promise<{client: {id: number; nom: string}; template: WorkstationTemplate}> {
+  if (!Number.isSafeInteger(clientId) || clientId <= 0 || !Number.isSafeInteger(templateId) || templateId <= 0) throw new Error('Sélection du client et du modèle invalide');
+  const data = await request<{client: {id: number; nom: string}; template: WorkstationTemplate}>(`/audit-source?clientId=${clientId}&templateId=${templateId}`);
+  if (!data.client || data.client.id !== clientId || typeof data.client.nom !== 'string' || !data.client.nom.trim() ||
+      !validTemplate(data.template) || data.template.id !== templateId || (data.template.clientId !== null && data.template.clientId !== clientId)) {
+    throw new Error('Source de procédure invalide');
+  }
+  return data;
+}
+export async function listWorkstationClients(): Promise<ClientPrime[]> {
   const response = await fetch('/api/clients', { credentials: 'include' });
   const data = await response.json();
   if (!response.ok) throw new ProcedureApiError(data.error || `Erreur ${response.status}`, response.status);
-  if (!Array.isArray(data.clients)) throw new Error('Réponse des clients invalide');
-  return data.clients.filter((c: ClientPrime) => c.clientType === 'ti');
+  if (!Array.isArray(data.clients) || !data.clients.every((c: ClientPrime) => c && Number.isSafeInteger(c.id) && c.id > 0 && typeof c.nom === 'string' &&
+    (c.primeId === null || Number.isSafeInteger(c.primeId) && c.primeId > 0) && (c.clientType === null || c.clientType === 'ti' || c.clientType === 'telecom'))) {
+    throw new Error('Réponse des clients invalide');
+  }
+  // /api/clients already scopes Prime users. An admin sees every assigned client.
+  // Never infer that an unclassified client is TI: show it but forbid creation.
+  return data.clients.filter((c: ClientPrime) => c.primeId !== null && c.clientType !== 'telecom')
+    .sort((a: ClientPrime, b: ClientPrime) => a.nom.localeCompare(b.nom, 'fr-CA'));
 }

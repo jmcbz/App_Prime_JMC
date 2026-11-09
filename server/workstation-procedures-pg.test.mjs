@@ -33,6 +33,56 @@ async function req(method,route,who,body){const response=await fetch(base+route,
 const sections=[{title:'Préparation',steps:[{id:'check',title:'Audit',note:'Note'}]}];
 try{
  let ready=false;for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,50));}assert(ready,logs);
+ await test('PG audit source enforces current TI assignment and matching selected model',async()=>{
+  const global=(await req('GET','/api/workstation-procedures/templates','a')).body.templates[0];
+  const local=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:own.id,name:'PG audit local',sections})).template;
+  const other=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:foreign.id,name:'PG foreign',sections})).template;
+  const unknown=await db.createClient({nom:'Unclassified',primeId:a.prime.id});
+  const unassigned=await db.createClient({nom:'Unassigned',clientType:'ti'});
+  assert((await req('GET','/api/clients','a')).body.clients.some(c=>c.id===unknown.id));
+  const url=(c,t)=>`/api/workstation-procedures/audit-source?clientId=${c}&templateId=${t}`;
+  assert.deepEqual(await req('GET',url(own.id,local.id),'a'),{status:200,body:{client:{id:own.id,nom:'TI client'},template:local}});
+  assert.deepEqual((await req('GET',url(own.id,global.id),'a')).body,{client:{id:own.id,nom:'TI client'},template:global});
+  assert.deepEqual((await req('GET',url(foreign.id,other.id),'admin')).body,{client:{id:foreign.id,nom:'Foreign TI'},template:other});
+  assert.equal((await req('GET',url(own.id,local.id))).status,401);
+  for(const who of ['a','admin'])for(const c of [telecom.id,unknown.id,unassigned.id])assert.equal((await req('GET',url(c,global.id),who)).status,404);
+  assert.equal((await req('GET',url(foreign.id,other.id),'a')).status,404);
+  for(const who of ['a','admin'])assert.equal((await req('GET',url(own.id,other.id),who)).status,404);
+  for(const bad of ['0','1x','1.0','9007199254740992',''])assert.equal((await req('GET',url(bad,local.id),'a')).status,400);
+  assert.equal((await req('GET',url(own.id,'1x'),'a')).status,400);
+  const moving=await db.createClient({nom:'Moving',clientType:'ti',primeId:a.prime.id});
+  assert.equal((await req('GET',url(moving.id,global.id),'a')).status,200);
+  await db.updateClient(moving.id,{nom:'Moving',primeId:b.prime.id},{primeId:a.prime.id,servoClientId:null});
+  assert.equal((await req('GET',url(moving.id,global.id),'a')).status,404);
+  assert.equal((await req('GET',url(moving.id,global.id),'b')).status,200);
+ });
+ await test('PG HTTP dossier audit source rejects stale assignment but preserves historical admin read',async()=>{
+  const model=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:null,name:'PG snapshot',sections})).template;
+  const client=await db.createClient({nom:'PG Snapshot',clientType:'ti',primeId:a.prime.id});
+  const dossier=(await db.createWorkstationDossier({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:client.id,templateId:model.id,employee:'E',computer:'PC',ticket:'T',date:'2026-11-09'})).dossier;
+  const url=`/api/workstation-procedures/audit-source/dossier/${dossier.id}`;
+  assert.deepEqual(await req('GET',url,'a'),{status:200,body:{dossier}});
+  assert.deepEqual(await req('GET',url,'admin'),{status:200,body:{dossier}});
+  assert.equal((await req('GET',url)).status,401);
+  assert.equal((await req('GET',url,'b')).status,404);
+  assert.equal((await req('GET','/api/workstation-procedures/audit-source/dossier/999999','admin')).status,404);
+  for(const bad of ['0','-1','1x','1.0','9007199254740992'])assert.equal((await req('GET',`/api/workstation-procedures/audit-source/dossier/${bad}`,'admin')).status,400);
+  await pool.query('UPDATE workstation_templates SET name=$1,sections=$2 WHERE id=$3',['Edited',JSON.stringify([{title:'Changed',steps:[{id:'changed',title:'Changed',note:''}]}]),model.id]);
+  assert.deepEqual((await req('GET',url,'a')).body,{dossier});
+  await db.updateClient(client.id,{nom:'PG Snapshot',primeId:b.prime.id},{primeId:a.prime.id,servoClientId:null});
+  assert.equal((await req('GET',url,'a')).status,404);
+  assert.deepEqual((await req('GET',url,'b')).body,{dossier});
+  await pool.query('UPDATE clients SET prime_id=NULL WHERE id=$1',[client.id]);
+  assert.equal((await req('GET',url,'admin')).status,404);
+  assert.equal((await req('GET',url,'b')).status,404);
+  assert.deepEqual((await req('GET',`/api/workstation-procedures/dossiers/${dossier.id}`,'admin')).body,{dossier});
+  await pool.query('UPDATE clients SET prime_id=$1 WHERE id=$2',[a.prime.id,client.id]);
+  for(const type of ['telecom',null]){
+   await pool.query('UPDATE clients SET data=$1 WHERE id=$2',[JSON.stringify({nom:'PG Snapshot',clientType:type}),client.id]);
+   assert.equal((await req('GET',url,'admin')).status,404);
+   assert.equal((await req('GET',url,'a')).status,404);
+  }
+ });
  await test('PG real HTTP persists template and dossier; scope, versions and archival',async()=>{
   const seeded=await req('GET','/api/workstation-procedures/templates','a');assert.equal(seeded.status,200,JSON.stringify(seeded)+' '+logs);assert.equal(seeded.body.templates.filter(x=>x.name==='Montage de poste — standard BZ').length,1);
   assert.equal((await req('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:foreign.id,name:'X',sections})).status,404);
