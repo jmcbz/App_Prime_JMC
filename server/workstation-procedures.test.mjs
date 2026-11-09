@@ -1,0 +1,123 @@
+import crypto from 'node:crypto';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawn,spawnSync} from 'node:child_process';
+import net from 'node:net';
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'prime-workstation-'));
+process.env.SQLITE_PATH=path.join(dir,'fixture.sqlite');
+process.env.APP_PRIME_ALLOW_NEW_DATABASE='1';
+process.env.JWT_SECRET='workstation-fixture-only';
+delete process.env.DATABASE_URL;
+const db=await import('./database/index.js');
+const auth=await import('./auth.js');
+const driver=await db.initDb();
+const admin=await db.createUser({email:'admin@test.invalid',passwordHash:'dummy',role:'admin'});
+const a=await db.createUserWithPrime({email:'a@test.invalid',passwordHash:'dummy'});
+const b=await db.createUserWithPrime({email:'b@test.invalid',passwordHash:'dummy'});
+const own=await db.createClient({nom:'Own TI',clientType:'ti',primeId:a.prime.id});
+const foreign=await db.createClient({nom:'Foreign TI',clientType:'ti',primeId:b.prime.id});
+const telecom=await db.createClient({nom:'Telecom',clientType:'telecom',primeId:a.prime.id});
+async function token(user){await db.upsertMfaPending(user.id,'dummy-secret');return auth.issueSessionToken(user,await db.enableMfa(user.id));}
+const tokens={admin:await token(admin),a:await token(a.user),b:await token(b.user)};
+const socket=net.createServer();await new Promise(r=>socket.listen(0,'127.0.0.1',r));const port=socket.address().port;await new Promise(r=>socket.close(r));
+const child=spawn(process.execPath,['server/index.js'],{cwd:process.cwd(),env:{...process.env,PORT:String(port),SEED_ADMIN_EMAIL:'admin@test.invalid'},stdio:['ignore','pipe','pipe']});
+let logs='';child.stderr.on('data',d=>logs+=d);child.stdout.on('data',d=>logs+=d);
+const base=`http://127.0.0.1:${port}`;
+async function request(method,route,who,body,origin){const response=await fetch(base+route,{method,headers:{...(who?{Cookie:`app_prime_session=${tokens[who]}`}:{}) ,...(body?{'Content-Type':'application/json'}:{}),...(origin?{Origin:origin}:{})},body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.json()};}
+const section=[{title:'Préparation',steps:[{id:'audit',title:'Audit',note:'Noter le modèle'}]}];
+try {
+  for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok)break;}catch{}await new Promise(r=>setTimeout(r,50));}
+  await test('shared templates and scoped dossier snapshots over authenticated HTTP',async()=>{
+    const initial=await request('GET','/api/workstation-procedures/templates','a');
+    assert.equal(initial.status,200,logs);
+    assert(initial.body.templates.some(t=>t.name==='Montage de poste — standard BZ'&&t.sections.length===5));
+    const global=initial.body.templates.find(t=>t.name==='Montage de poste — standard BZ');
+    assert.equal(global.sections.reduce((n,s)=>n+s.steps.length,0),23);
+    assert.equal((await request('PUT',`/api/workstation-procedures/templates/${global.id}`,'a',{name:'Hijack',sections:section,expectedVersion:1})).status,403);
+    const adminGlobal=await request('POST','/api/workstation-procedures/templates','admin',{requestKey:crypto.randomUUID(),clientId:null,name:'Shared new',sections:section});
+    assert.equal(adminGlobal.status,201);
+    assert.equal((await request('PUT',`/api/workstation-procedures/templates/${global.id}`,'admin',{name:'BZ renamed',sections:global.sections,expectedVersion:1})).status,200);
+    assert.equal((await request('GET','/api/workstation-procedures/templates','b')).body.templates.some(t=>t.id===adminGlobal.body.template.id),true);
+    assert.equal((await request('GET','/api/workstation-procedures/templates')).status,401);
+    const denied=await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:foreign.id,name:'Private',sections:section});assert.equal(denied.status,404);
+    assert.equal((await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:telecom.id,name:'No telecom',sections:section})).status,404);
+    assert.equal((await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:null,name:'Global',sections:section})).status,403);
+    const created=await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:own.id,name:'Own template',sections:section});assert.equal(created.status,201,JSON.stringify(created));
+    const template=created.body.template;assert.equal(template.clientId,own.id);
+    assert.equal((await request('GET','/api/workstation-procedures/templates','b')).body.templates.some(t=>t.id===template.id),false);
+    const dossierResult=await request('POST','/api/workstation-procedures/dossiers','a',{requestKey:crypto.randomUUID(),clientId:own.id,templateId:template.id,employee:'Employé',computer:'PC1',ticket:'BZ-1',date:'2026-11-09'});assert.equal(dossierResult.status,201,JSON.stringify(dossierResult));
+    const dossier=dossierResult.body.dossier;assert.equal(dossier.sections[0].steps[0].etat,'todo');
+    await assert.rejects(db.updateClient(own.id,{nom:'Own TI',primeId:a.prime.id,clientType:'telecom'},{primeId:a.prime.id,servoClientId:null}),e=>e.statusCode===409);
+    assert.equal((await request('GET',`/api/workstation-procedures/dossiers/${dossier.id}`,'b')).status,404);
+    assert.equal((await request('PUT',`/api/workstation-procedures/dossiers/${dossier.id}`,'b',{expectedVersion:1,employee:'X',computer:'X',ticket:'X',date:'2026-11-09',sections:dossier.sections})).status,404);
+    assert.equal((await request('POST','/api/workstation-procedures/dossiers','a',{requestKey:crypto.randomUUID(),clientId:foreign.id,templateId:template.id,employee:'X',computer:'',ticket:'',date:'2026-11-09'})).status,404);
+    const edited=await request('PUT',`/api/workstation-procedures/templates/${template.id}`,'a',{expectedVersion:1,name:'Changed',sections:[{title:'Other',steps:[{id:'new',title:'New',note:''}]}]});assert.equal(edited.status,200);
+    assert.equal((await request('GET',`/api/workstation-procedures/dossiers/${dossier.id}`,'a')).body.dossier.sections[0].steps[0].title,'Audit');
+    assert.equal((await request('PUT',`/api/workstation-procedures/templates/${template.id}`,'a',{expectedVersion:1,name:'Stale',sections:section})).status,409);
+    const changed=structuredClone(dossier.sections);changed[0].steps[0].etat='fait';changed[0].steps[0].commentaire='Validé';
+    const injected=structuredClone(changed);injected[0].steps[0].title='Unauthorized structural edit';
+    assert.equal((await request('PUT',`/api/workstation-procedures/dossiers/${dossier.id}`,'a',{expectedVersion:1,employee:'Employé',computer:'PC1',ticket:'BZ-1',date:'2026-11-09',sections:injected})).status,400);
+    const updated=await request('PUT',`/api/workstation-procedures/dossiers/${dossier.id}`,'a',{expectedVersion:1,employee:'Employé',computer:'PC1',ticket:'BZ-1',date:'2026-11-09',sections:changed});assert.equal(updated.status,200,JSON.stringify(updated));assert.equal(updated.body.dossier.version,2);
+    assert.equal((await request('PUT',`/api/workstation-procedures/dossiers/${dossier.id}`,'a',{expectedVersion:1,employee:'Bad',computer:'',ticket:'',date:'2026-11-09',sections:changed})).status,409);
+    assert.equal((await request('POST',`/api/workstation-procedures/dossiers/${dossier.id}/archive`,'a',{expectedVersion:2},'http://evil.test')).status,403);
+    assert.equal((await request('POST',`/api/workstation-procedures/dossiers/${dossier.id}/archive`,'a',{expectedVersion:2})).status,200);
+    assert.equal((await request('GET','/api/workstation-procedures/dossiers','b')).body.dossiers.some(d=>d.id===dossier.id),false);
+    assert.equal((await request('GET','/api/workstation-procedures/dossiers','admin')).body.dossiers.some(d=>d.id===dossier.id),true);
+    assert.equal((await request('POST',`/api/workstation-procedures/dossiers/${dossier.id}/archive`,'a',{expectedVersion:3})).status,409);
+  });
+  await test('idempotent creates, reconciliation, scope and cursor pages over real SQLite HTTP',async()=>{
+    const key=crypto.randomUUID(), payload={requestKey:key,clientId:foreign.id,name:'Retry model',sections:section};
+    const [first,second]=await Promise.all([request('POST','/api/workstation-procedures/templates','b',payload),request('POST','/api/workstation-procedures/templates','b',payload)]);
+    assert.equal(first.status,201,JSON.stringify(first));assert.equal(second.status,201,JSON.stringify(second));assert.equal(first.body.template.id,second.body.template.id);
+    assert.equal((await request('GET',`/api/workstation-procedures/templates/by-request/${key}`,'b')).body.template.id,first.body.template.id);
+    assert.equal((await request('GET',`/api/workstation-procedures/templates/by-request/${key}`,'a')).status,404);
+    assert.equal((await request('POST','/api/workstation-procedures/templates','b',{...payload,name:'Changed'})).status,409);
+    assert.equal((await request('POST','/api/workstation-procedures/templates','admin',payload)).status,409);
+    const dkey=crypto.randomUUID(), data={requestKey:dkey,clientId:foreign.id,templateId:first.body.template.id,employee:'One',computer:'PC',ticket:'BZ',date:'2026-11-09'};
+    const d1=await request('POST','/api/workstation-procedures/dossiers','b',data);assert.equal(d1.status,201,JSON.stringify(d1));
+    assert.equal((await request('POST','/api/workstation-procedures/dossiers','b',data)).body.dossier.id,d1.body.dossier.id);
+    assert.equal((await request('POST','/api/workstation-procedures/dossiers','b',{...data,ticket:'Another'})).status,409);
+    assert.equal((await request('GET',`/api/workstation-procedures/dossiers/by-request/${dkey}`,'b')).body.dossier.id,d1.body.dossier.id);
+    assert.equal((await request('GET',`/api/workstation-procedures/dossiers/by-request/${dkey}`,'admin')).status,404);
+    assert.equal((await request('POST','/api/workstation-procedures/templates','b',{...payload,requestKey:'not-uuid'})).status,400);
+    const globalKey=crypto.randomUUID(), globalPayload={requestKey:globalKey,clientId:null,name:'Global retry',sections:section};
+    assert.equal((await request('POST','/api/workstation-procedures/templates','admin',globalPayload)).status,201);
+    assert.equal((await request('POST','/api/workstation-procedures/templates','b',globalPayload)).status,409);
+    for(let i=0;i<54;i++)await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:null,name:`Bulk ${i}`,sections:section});
+    const page=await request('GET','/api/workstation-procedures/templates?limit=10','b');assert.equal(page.status,200,JSON.stringify(page));assert.equal(page.body.templates.length,10);assert.equal(page.body.hasMore,true);assert(Number.isSafeInteger(page.body.nextBefore));
+    const next=await request('GET',`/api/workstation-procedures/templates?limit=10&before=${page.body.nextBefore}`,'b');assert.equal(next.body.templates.length,10);assert(next.body.templates.every(t=>t.id<page.body.nextBefore));
+    assert.equal((await request('GET','/api/workstation-procedures/templates/standard','b')).body.template.sections.length,5);
+    const insert=driver.sqlite.prepare('INSERT INTO workstation_dossiers(client_id,template_id,employee,computer,ticket,date,sections) VALUES (?,?,?,?,?,?,?)');
+    for(let i=0;i<52;i++)insert.run(foreign.id,first.body.template.id,'Bulk','PC','BZ','2026-11-09',JSON.stringify(d1.body.dossier.sections));
+    const dossierPage=await request('GET','/api/workstation-procedures/dossiers?limit=50','b');assert.equal(dossierPage.body.dossiers.length,50);assert.equal(dossierPage.body.hasMore,true);
+    const dossierNext=await request('GET',`/api/workstation-procedures/dossiers?limit=50&before=${dossierPage.body.nextBefore}`,'b');assert.equal(dossierNext.body.dossiers.length,3);assert.equal(dossierNext.body.hasMore,false);
+    assert.equal((await request('GET','/api/workstation-procedures/dossiers?limit=0','b')).status,400);
+    await db.updateClient(foreign.id,{nom:'Foreign TI',primeId:a.prime.id},{primeId:b.prime.id,servoClientId:null});
+    assert.equal((await request('POST','/api/workstation-procedures/templates','b',payload)).status,404);
+    assert.equal((await request('GET',`/api/workstation-procedures/templates/by-request/${key}`,'b')).status,404);
+    assert.equal((await request('POST','/api/workstation-procedures/dossiers','b',data)).status,404);
+    assert.equal((await request('GET',`/api/workstation-procedures/dossiers/by-request/${dkey}`,'b')).status,404);
+  });
+  await test('SQLite repeated boot preserves filled dossiers and seeds standard once',()=>{
+    const before=driver.sqlite.prepare('SELECT id,sections,version FROM workstation_dossiers ORDER BY id').all();
+    const boot="import {initDb} from './server/database/index.js'; const driver=await initDb(); console.log(JSON.stringify(driver.sqlite.prepare(\"SELECT count(*) AS n FROM workstation_templates WHERE seed_key='bz-standard-workstation-v1'\").get())); driver.sqlite.close();";
+    for(let i=0;i<2;i++){
+      const result=spawnSync(process.execPath,['--input-type=module','-e',boot],{cwd:process.cwd(),env:process.env,encoding:'utf8'});
+      assert.equal(result.status,0,result.stderr);
+      assert.equal(JSON.parse(result.stdout.trim().split('\n').at(-1)).n,1);
+      assert.deepEqual(driver.sqlite.prepare('SELECT id,sections,version FROM workstation_dossiers ORDER BY id').all(),before);
+    }
+  });
+  await test('foreign schema identity rejects boot before touching workstation data',()=>{
+    const before=driver.sqlite.prepare('SELECT id,sections,version FROM workstation_dossiers ORDER BY id').all();
+    driver.sqlite.exec('CREATE TABLE foreign_marker(id INTEGER PRIMARY KEY)');
+    const boot=spawnSync(process.execPath,['--input-type=module','-e',"import {initDb} from './server/database/index.js'; await initDb();"],{cwd:process.cwd(),env:process.env,encoding:'utf8'});
+    assert.notEqual(boot.status,0);
+    assert.match(boot.stderr,/Schéma étranger à App Prime/);
+    assert.deepEqual(driver.sqlite.prepare('SELECT id,sections,version FROM workstation_dossiers ORDER BY id').all(),before);
+    driver.sqlite.exec('DROP TABLE foreign_marker');
+  });
+} finally {child.kill();driver.sqlite.close();fs.rmSync(dir,{recursive:true,force:true});}

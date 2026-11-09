@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard';
 import Primes from './pages/Primes';
 import Clients from './pages/Clients';
 import Procedures from './pages/Procedures';
+import WorkstationProcedures from './pages/WorkstationProcedures';
 import ClientOnboarding from './pages/ClientOnboarding';
 import Suivis from './pages/Suivis';
 import Administration from './pages/Administration';
@@ -68,6 +69,7 @@ export default function App() {
         <Route path="/primes" element={<Primes />} />
         <Route path="/clients" element={<Clients />} />
         <Route path="/procedures" element={<Procedures />} />
+        <Route path="/procedures/installation-postes" element={<WorkstationProcedures />} />
         <Route path="/procedures/prise-en-charge" element={<ClientOnboarding />} />
         <Route path="/suivis" element={<Suivis />} />
         <Route

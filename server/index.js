@@ -330,6 +330,28 @@ app.delete('/api/clients/:id', auth.requireAuth, auth.requireAdmin, async (req, 
   }
 });
 
+// Shared workstation procedures; all writes inherit the global origin guard.
+function workstationId(req) {
+  const id=Number(req.params.id);
+  if(!Number.isSafeInteger(id)||id<=0) throw Object.assign(new Error('ID invalide'),{statusCode:400});
+  return id;
+}
+function workstationRoute(fn,status=200){return async(req,res)=>{
+  try {res.status(status).json(await fn(req));}
+  catch(error){if([400,403,404,409].includes(error.statusCode))return res.status(error.statusCode).json({error:error.message});handleError(res,error,'Erreur procédure de poste');}
+};}
+app.get('/api/workstation-procedures/templates',auth.requireAuth,workstationRoute(req=>db.listWorkstationTemplates(req.auth,req.query)));
+app.get('/api/workstation-procedures/templates/standard',auth.requireAuth,workstationRoute(()=>db.standardWorkstationTemplate()));
+app.get('/api/workstation-procedures/templates/by-request/:requestKey',auth.requireAuth,workstationRoute(req=>db.reconcileWorkstationTemplate(req.auth,req.params.requestKey)));
+app.post('/api/workstation-procedures/templates',auth.requireAuth,workstationRoute(req=>db.createWorkstationTemplate(req.auth,req.body),201));
+app.put('/api/workstation-procedures/templates/:id',auth.requireAuth,workstationRoute(req=>db.updateWorkstationTemplate(req.auth,workstationId(req),req.body)));
+app.get('/api/workstation-procedures/dossiers',auth.requireAuth,workstationRoute(req=>db.listWorkstationDossiers(req.auth,req.query)));
+app.get('/api/workstation-procedures/dossiers/by-request/:requestKey',auth.requireAuth,workstationRoute(req=>db.reconcileWorkstationDossier(req.auth,req.params.requestKey)));
+app.get('/api/workstation-procedures/dossiers/:id',auth.requireAuth,workstationRoute(req=>db.getWorkstationDossier(req.auth,workstationId(req))));
+app.post('/api/workstation-procedures/dossiers',auth.requireAuth,workstationRoute(req=>db.createWorkstationDossier(req.auth,req.body),201));
+app.put('/api/workstation-procedures/dossiers/:id',auth.requireAuth,workstationRoute(req=>db.updateWorkstationDossier(req.auth,workstationId(req),req.body)));
+app.post('/api/workstation-procedures/dossiers/:id/archive',auth.requireAuth,workstationRoute(req=>db.archiveWorkstationDossier(req.auth,workstationId(req),req.body?.expectedVersion)));
+
 // Prime-owned prise en charge. All authority comes from the current session.
 function onboardingError(res, error) {
   if ([400,404,409,413].includes(error?.statusCode)) return res.status(error.statusCode).json({ error:error.message });

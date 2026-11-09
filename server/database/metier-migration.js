@@ -12,6 +12,8 @@ const CORE = {
 };
 const LEGACY_REQUIRED = { primes: 'nom', clients: 'nom', suivis: 'titre' };
 const BOARD_COLUMNS = {
+  workstation_templates: ['id','client_id','name','sections','version'],
+  workstation_dossiers: ['id','client_id','template_id','employee','computer','ticket','date','sections','version','archived_at'],
   client_onboardings: ['id','client_id','technicien_id','titre','statut','priorite','urgence_ti','site_principal','contact_principal','periode_couverte','prepare_pour','avancement_global','risques_critiques','actions_ouvertes','decisions_requises','prochaine_rencontre','version','data','archived','archived_at','compte_rendu','created_by_id','created_by_email','updated_by_id','updated_by_email','created_at','updated_at'],
   client_onboarding_items: ['id','onboarding_id','section_key','section_title','item_order','checked','priorite','statut','element','notes','action','responsable','echeance','created_at','updated_at'],
   client_onboarding_history: ['id','onboarding_id','event_type','snapshot','actor_id','actor_email','created_at'],
@@ -27,6 +29,8 @@ const USER_COLUMNS = {
   prime_user_links: ['user_id', 'prime_id'],
 };
 const PG_TYPES = {
+  workstation_templates: { id:'int4',client_id:'int4',seed_key:'text',name:'text',sections:'jsonb',version:'int4' },
+  workstation_dossiers: { id:'int4',client_id:'int4',template_id:'int4',employee:'text',computer:'text',ticket:'text',date:'text',sections:'jsonb',version:'int4',archived_at:'timestamp' },
   users: { id: 'int4', email: 'text', password_hash: 'text', is_active: 'bool', created_at: 'timestamp' },
   user_mfa: { user_id: 'int4', secret_encrypted: 'text', mfa_enabled: 'bool', pending_setup: 'bool' },
   prime_user_links: { user_id: 'int4', prime_id: 'int4' },
@@ -40,6 +44,9 @@ const PG_TYPES = {
   tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', prochaine_action_echeance: 'text', version: 'text' },
 };
 const PG_FOREIGN_KEYS = [
+  ['workstation_templates','client_id','clients','id','RESTRICT'],
+  ['workstation_dossiers','client_id','clients','id','RESTRICT'],
+  ['workstation_dossiers','template_id','workstation_templates','id','RESTRICT'],
   ['client_onboardings','client_id','clients','id','RESTRICT'],
   ['client_onboardings','technicien_id','users','id','SET NULL'],
   ['client_onboardings','created_by_id','users','id','SET NULL'],
@@ -57,6 +64,8 @@ const PG_FOREIGN_KEYS = [
   ['tableau_rubriques', 'tableau_id', 'tableaux_suivi', 'id', 'CASCADE'],
 ];
 const SQLITE_TYPES = {
+  workstation_templates: {id:'INTEGER',client_id:'INTEGER',seed_key:'TEXT',name:'TEXT',sections:'TEXT',version:'INTEGER'},
+  workstation_dossiers: {id:'INTEGER',client_id:'INTEGER',template_id:'INTEGER',employee:'TEXT',computer:'TEXT',ticket:'TEXT',date:'TEXT',sections:'TEXT',version:'INTEGER',archived_at:'TEXT'},
   users: { id: 'INTEGER', email: 'TEXT', password_hash: 'TEXT', is_active: 'INTEGER' },
   user_mfa: { user_id: 'INTEGER', secret_encrypted: 'TEXT', mfa_enabled: 'INTEGER', pending_setup: 'INTEGER' },
   prime_user_links: { user_id: 'INTEGER', prime_id: 'INTEGER' },
@@ -263,6 +272,7 @@ export async function migratePgMetier(pool, createSchema) {
     await createSchema(connection);
     await connection.query('ALTER TABLE tableau_rubriques ADD COLUMN IF NOT EXISTS prochaine_action_echeance TEXT');
     await (await import('./client-onboardings.js')).createOnboardingSchemaPg(connection);
+    await (await import('./workstation-procedures.js')).migratePg(connection);
     const found = await pgColumns(connection);
     const legacy = {};
     for (const table of Object.keys(TABLES)) {

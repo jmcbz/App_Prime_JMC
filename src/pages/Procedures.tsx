@@ -32,6 +32,11 @@ export default function Procedures() {
       />
 
       <Card className="mb-5">
+        <h2 className="font-semibold text-white">Installation de postes TI</h2>
+        <p className="mt-1 text-sm text-slate-400">Modèles partagés, dossiers d’installation et script d’audit Windows.</p>
+        <Link to="/procedures/installation-postes" className="mt-3 inline-flex rounded-lg bg-bz-blue px-4 py-2 text-sm font-semibold text-white">Ouvrir l’outil →</Link>
+      </Card>
+      <Card className="mb-5">
         <h2 className="font-semibold text-white">Prise en charge client TI</h2>
         <p className="mt-1 text-sm text-slate-400">Checklist terrain, compte rendu, historique et exports.</p>
         <Link to="/procedures/prise-en-charge" className="mt-3 inline-flex rounded-lg bg-bz-blue px-4 py-2 text-sm font-semibold text-white">Ouvrir l’outil →</Link>

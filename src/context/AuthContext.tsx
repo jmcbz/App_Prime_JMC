@@ -15,6 +15,8 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
 const pendingPrefix = 'client-onboarding:pending-create:';
+const workstationPrefix = 'workstation-procedures:pending-create:';
+const pendingPrefixes = [pendingPrefix, workstationPrefix];
 
 // Session storage is origin-wide, not protected by the account id in a key.
 function discardOtherAccountDrafts(keepId: number | null) {
@@ -22,7 +24,7 @@ function discardOtherAccountDrafts(keepId: number | null) {
   const keys: string[] = [];
   for (let i = 0; i < storage.length; i++) {
     const key = storage.key(i);
-    if (key?.startsWith(pendingPrefix) && key !== (keepId == null ? null : `${pendingPrefix}${keepId}`)) keys.push(key);
+    if (key && pendingPrefixes.some(prefix => key.startsWith(prefix) && key !== (keepId == null ? null : `${prefix}${keepId}`))) keys.push(key);
   }
   for (const key of keys) {
     storage.removeItem(key);
@@ -33,7 +35,7 @@ function discardOtherAccountDrafts(keepId: number | null) {
 function hasPendingDraft() {
   const storage = window.sessionStorage;
   for (let i = 0; i < storage.length; i++) {
-    if (storage.key(i)?.startsWith(pendingPrefix)) return true;
+    if (pendingPrefixes.some(prefix => storage.key(i)?.startsWith(prefix))) return true;
   }
   return false;
 }

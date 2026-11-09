@@ -16,7 +16,10 @@ await unlink(outfile);
 const a = {id: 101, email: 'a@example.com', prenom: 'A', nom: 'User', role: 'admin', is_active: true};
 const b = {...a, id: 202, email: 'b@example.com'};
 const key = id => `client-onboarding:pending-create:${id}`;
+const workstationKey = id => `workstation-procedures:pending-create:${id}`;
 function deferred() { let resolve; const promise = new Promise(r => {resolve = r;}); return {promise, resolve}; }
+
+test('confirmed account switch purges workstation intent before exposing the next user',async()=>{let identity=a;const h=await harness(url=>{if(url==='/api/auth/me')return Response.json({user:identity});throw Error(`Unexpected ${url}`);});try{h.dom.window.sessionStorage.setItem(workstationKey(101),'secret');identity=b;await act(async()=>h.dom.window.dispatchEvent(new h.dom.window.Event('focus')));assert.equal(h.visible(),'private:202');assert.equal(h.dom.window.sessionStorage.getItem(workstationKey(101)),null);}finally{await h.close();}});
 async function harness(fetch) {
   const dom = new JSDOM('<div id="app"></div>', {url: 'http://localhost/'});
   const previous = {window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch};

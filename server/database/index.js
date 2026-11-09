@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier, migrateSqliteRubriqueEcheance } from './metier-migration.js';
 import { applyPrimePortfolio } from './prime-portfolio.js';
 import * as onboardings from './client-onboardings.js';
+import * as workstation from './workstation-procedures.js';
 import { createOnboardingSchemaSqlite, createOnboardingSchemaPg } from './client-onboardings.js';
 import { guardSqlite, withSqliteOwner } from './sqlite-isolation.js';
 import { backfillTableaux, createInitialTableauSqlite, createTableauForClient, listTableaux as listTableauxRows, updateRubrique as updateRubriqueRow } from './tableaux-suivi.js';
@@ -71,6 +72,7 @@ export async function initDb() {
         const legacyColumns = migrateSqliteMetier(sqlite);
         sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_servo_id ON clients(json_extract(data, '$.servoClientId')) WHERE json_extract(data, '$.servoClientId') IS NOT NULL");
         createOnboardingSchemaSqlite(sqlite);
+        workstation.migrateSqlite(sqlite);
         if (sqlite.pragma('foreign_key_check').length) throw new Error('Schéma App Prime: références étrangères invalides');
         return legacyColumns;
       }).immediate();
@@ -764,7 +766,7 @@ export async function updateClient(id, input, expected) {
     const nextType = Object.hasOwn(input, 'clientType') ? validateClientType(input.clientType) : current.clientType;
     if (current.clientType === 'ti' && nextType !== 'ti') {
       const exists = driver.kind === 'sqlite'
-        ? driver.sqlite.prepare('SELECT 1 FROM client_onboardings WHERE client_id = ? LIMIT 1').get(id)
+        ? driver.sqlite.prepare('SELECT 1 FROM client_onboardings WHERE client_id = ? UNION SELECT 1 FROM workstation_templates WHERE client_id = ? UNION SELECT 1 FROM workstation_dossiers WHERE client_id = ? LIMIT 1').get(id,id,id)
         : null;
       if (exists) throw Object.assign(new Error('Classement TI requis tant que des prises en charge sont conservées'), { statusCode: 409 });
     }
@@ -789,7 +791,7 @@ export async function updateClient(id, input, expected) {
     const row = (await connection.query('SELECT * FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (!row) { await connection.query('ROLLBACK'); return null; }
     if (normalizeClient(row).clientType === 'ti' && Object.hasOwn(input, 'clientType') && input.clientType !== 'ti') {
-      const retained = await connection.query('SELECT 1 FROM client_onboardings WHERE client_id = $1 LIMIT 1', [id]);
+      const retained = await connection.query('SELECT 1 FROM client_onboardings WHERE client_id = $1 UNION SELECT 1 FROM workstation_templates WHERE client_id = $1 UNION SELECT 1 FROM workstation_dossiers WHERE client_id = $1 LIMIT 1', [id]);
       if (retained.rowCount) throw Object.assign(new Error('Classement TI requis tant que des prises en charge sont conservées'), { statusCode: 409 });
     }
     const fields = update(row);
@@ -804,6 +806,17 @@ export async function updateClient(id, input, expected) {
 }
 
 export async function listClientOnboardings(actor, filters) { return onboardings.list(driver,actor,filters); }
+export async function listWorkstationTemplates(actor,query) { return workstation.listTemplates(driver,actor,query); }
+export async function standardWorkstationTemplate() { return workstation.getStandardTemplate(driver); }
+export async function reconcileWorkstationTemplate(actor,key) { return workstation.reconcileTemplate(driver,actor,key); }
+export async function createWorkstationTemplate(actor,input) { return workstation.createTemplate(driver,actor,input); }
+export async function updateWorkstationTemplate(actor,id,input) { return workstation.updateTemplate(driver,actor,id,input); }
+export async function listWorkstationDossiers(actor,query) { return workstation.listDossiers(driver,actor,query); }
+export async function reconcileWorkstationDossier(actor,key) { return workstation.reconcileDossier(driver,actor,key); }
+export async function getWorkstationDossier(actor,id) { return workstation.getDossier(driver,actor,id); }
+export async function createWorkstationDossier(actor,input) { return workstation.createDossier(driver,actor,input); }
+export async function updateWorkstationDossier(actor,id,input) { return workstation.updateDossier(driver,actor,id,input); }
+export async function archiveWorkstationDossier(actor,id,version) { return workstation.archiveDossier(driver,actor,id,version); }
 export async function getClientOnboarding(id, actor) { return onboardings.detail(driver,id,actor); }
 export async function getClientOnboardingHistory(id, actor, params) { return onboardings.historyPage(driver,id,actor,params); }
 export async function createClientOnboarding(data, items, actor, requestKey) { return onboardings.create(driver,data,items,actor,requestKey); }
@@ -819,7 +832,7 @@ export async function deleteClient(id) {
     return driver.sqlite.transaction(() => {
       const present = driver.sqlite.prepare('SELECT 1 FROM clients WHERE id = ?').get(id);
       if (!present) return;
-      const history = driver.sqlite.prepare('SELECT 1 FROM tableaux_suivi WHERE client_id = ? UNION SELECT 1 FROM suivis WHERE client_id = ? UNION SELECT 1 FROM client_onboardings WHERE client_id = ? LIMIT 1').get(id,id,id);
+      const history = driver.sqlite.prepare('SELECT 1 FROM tableaux_suivi WHERE client_id = ? UNION SELECT 1 FROM suivis WHERE client_id = ? UNION SELECT 1 FROM client_onboardings WHERE client_id = ? UNION SELECT 1 FROM workstation_templates WHERE client_id = ? UNION SELECT 1 FROM workstation_dossiers WHERE client_id = ? LIMIT 1').get(id,id,id,id,id);
       if (history) throw retained();
       driver.sqlite.prepare('DELETE FROM clients WHERE id = ?').run(id);
     }).immediate();
@@ -829,7 +842,7 @@ export async function deleteClient(id) {
     await tx.query('BEGIN');
     const present = (await tx.query('SELECT id FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (present) {
-      const history = await tx.query('SELECT 1 FROM tableaux_suivi WHERE client_id = $1 UNION SELECT 1 FROM suivis WHERE client_id = $1 UNION SELECT 1 FROM client_onboardings WHERE client_id = $1 LIMIT 1', [id]);
+      const history = await tx.query('SELECT 1 FROM tableaux_suivi WHERE client_id = $1 UNION SELECT 1 FROM suivis WHERE client_id = $1 UNION SELECT 1 FROM client_onboardings WHERE client_id = $1 UNION SELECT 1 FROM workstation_templates WHERE client_id = $1 UNION SELECT 1 FROM workstation_dossiers WHERE client_id = $1 LIMIT 1', [id]);
       if (history.rowCount) throw retained();
       await tx.query('DELETE FROM clients WHERE id = $1', [id]);
     }
