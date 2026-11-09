@@ -49,7 +49,7 @@ function blank(board, clientId) {
   assert.ok(board.createdAt);
   assert.deepEqual(board.rubriques.map(r => r.key), keys);
   for (const rubrique of board.rubriques) assert.deepEqual(rubrique, {
-    key: rubrique.key, statut: 'a_faire', date: null, note: '', prochaineAction: '', version: null,
+    key: rubrique.key, statut: 'a_faire', date: null, note: '', prochaineAction: '', prochaineActionEcheance: null, version: null,
   });
 }
 
@@ -101,17 +101,39 @@ test('boards: bootstrap, authorization, replacement, immutable history, transfer
     assert.equal((await call('GET','/api/tableaux-suivi',bToken)).data.tableaux.some(t => t.clientId === clientId), false);
     assert.equal((await call('POST','/api/tableaux-suivi',bToken,{clientId,expectedActiveId:createdBoard.id,primeId:b.prime.id})).status,404);
     assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,bToken,
-      {statut:'termine',date:null,note:'intrusion',prochaineAction:'',version:null})).status,404);
+      {statut:'termine',date:null,note:'intrusion',prochaineAction:'',prochaineActionEcheance:null,version:null})).status,404);
     assert.equal((await call('POST','/api/tableaux-suivi',aToken,{clientId:999999,expectedActiveId:null})).status,404);
     assert.equal((await call('POST','/api/tableaux-suivi',aToken,{clientId:'1'})).status,400);
     assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/absente`,aToken,
       {statut:'termine',date:null,note:'',prochaineAction:'',version:null})).status,400);
     assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,
       {statut:'invalid',date:null,note:'',prochaineAction:'',version:null})).status,400);
-    const payload = { statut:'en_cours', date:'2026-11-06', note:'Routeur vérifié', prochaineAction:'Suivi prévu', version:'7.4' };
+    const initialLegacy = await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/projets`,aToken,
+      {statut:'en_cours',date:null,note:'Old client on a null deadline',prochaineAction:'Follow up',version:null});
+    assert.equal(initialLegacy.status,200);
+    assert.equal(initialLegacy.data.tableau.rubriques.find(r=>r.key==='projets').prochaineActionEcheance,null);
+    const payload = { statut:'en_cours', date:'2026-11-06', note:'Routeur vérifié', prochaineAction:'Suivi prévu', prochaineActionEcheance:'2026-12-15', version:'7.4' };
     const changed = await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,payload);
     assert.equal(changed.status,200);
     assert.deepEqual(changed.data.tableau.rubriques.find(r=>r.key==='routeur'),{key:'routeur',...payload});
+    for (const date of ['2026-02-29','2026-13-01','2026-04-31','2026-12-1','']) {
+      assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,
+        {...payload,prochaineActionEcheance:date})).status,400);
+    }
+    const legacyUpdate = await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,
+      {...payload,note:'Sent by cached client',prochaineActionEcheance:undefined});
+    assert.equal(legacyUpdate.status,200);
+    assert.equal(legacyUpdate.data.tableau.rubriques.find(r=>r.key==='routeur').prochaineActionEcheance,payload.prochaineActionEcheance);
+    assert.equal(legacyUpdate.data.tableau.rubriques.find(r=>r.key==='routeur').note,'Sent by cached client');
+    assert.equal((await call('GET','/api/tableaux-suivi',aToken)).data.tableaux.find(t=>t.id===createdBoard.id)
+      .rubriques.find(r=>r.key==='routeur').prochaineActionEcheance,payload.prochaineActionEcheance);
+    const cleared = await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,
+      {...payload,prochaineActionEcheance:null});
+    assert.equal(cleared.status,200);
+    assert.equal(cleared.data.tableau.rubriques.find(r=>r.key==='routeur').prochaineActionEcheance,null);
+    assert.equal((await call('GET','/api/tableaux-suivi',aToken)).data.tableaux.find(t=>t.id===createdBoard.id)
+      .rubriques.find(r=>r.key==='routeur').prochaineActionEcheance,null);
+    assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,payload)).status,200);
     assert.deepEqual((await call('GET','/api/suivis',adminToken)).data.suivis, legacySuivis);
     assert.equal((await call('POST','/api/tableaux-suivi',aToken,{clientId,expectedActiveId:999999})).status,409);
     assert.equal((await call('GET','/api/tableaux-suivi',aToken)).data.tableaux.filter(t=>t.clientId===clientId).length,1);
@@ -129,6 +151,7 @@ test('boards: bootstrap, authorization, replacement, immutable history, transfer
     assert.equal(history.length,3);
     assert.equal(history.filter(t=>t.archivedAt===null).length,1);
     assert.equal(history.find(t=>t.id===createdBoard.id).rubriques.find(r=>r.key==='routeur').note,payload.note);
+    assert.deepEqual(history.find(t=>t.id===createdBoard.id).rubriques.find(r=>r.key==='routeur'),{key:'routeur',...payload});
     assert.ok(history.find(t=>t.id===createdBoard.id).archivedAt);
     assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,payload)).status,409);
     const current=history.find(t=>t.archivedAt===null);
@@ -146,5 +169,6 @@ test('boards: bootstrap, authorization, replacement, immutable history, transfer
     assert.equal(after.length,3);
     assert.equal(after.filter(t=>t.archivedAt===null).length,1);
     assert.equal(after.find(t=>t.id===current.id).rubriques.find(r=>r.key==='routeur').version,'7.4');
+    assert.equal(after.find(t=>t.id===createdBoard.id).rubriques.find(r=>r.key==='routeur').prochaineActionEcheance,payload.prochaineActionEcheance);
   } finally { await stop(); fs.rmSync(dir,{recursive:true,force:true}); }
 });

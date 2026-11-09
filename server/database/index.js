@@ -5,7 +5,7 @@
  */
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier } from './metier-migration.js';
+import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier, migrateSqliteRubriqueEcheance } from './metier-migration.js';
 import { applyPrimePortfolio } from './prime-portfolio.js';
 import * as onboardings from './client-onboardings.js';
 import { createOnboardingSchemaSqlite, createOnboardingSchemaPg } from './client-onboardings.js';
@@ -67,6 +67,7 @@ export async function initDb() {
       const legacyColumns = sqlite.transaction(() => {
         checkSqliteMetierIdentity(sqlite);
         createSchemaSqlite(sqlite);
+        migrateSqliteRubriqueEcheance(sqlite);
         const legacyColumns = migrateSqliteMetier(sqlite);
         sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_servo_id ON clients(json_extract(data, '$.servoClientId')) WHERE json_extract(data, '$.servoClientId') IS NOT NULL");
         createOnboardingSchemaSqlite(sqlite);
@@ -149,6 +150,7 @@ function createSchemaSqlite(sqlite) {
       date TEXT,
       note TEXT NOT NULL DEFAULT '',
       prochaine_action TEXT NOT NULL DEFAULT '',
+      prochaine_action_echeance TEXT,
       version TEXT,
       PRIMARY KEY (tableau_id, key)
     );
@@ -217,6 +219,7 @@ async function createSchemaPg(pool) {
       date TEXT,
       note TEXT NOT NULL DEFAULT '',
       prochaine_action TEXT NOT NULL DEFAULT '',
+      prochaine_action_echeance TEXT,
       version TEXT,
       PRIMARY KEY (tableau_id, key)
     );

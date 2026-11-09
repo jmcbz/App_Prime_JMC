@@ -39,12 +39,12 @@ test('scoped board listing never reads rubric data after ownership transfers', a
       CREATE TABLE clients (id INTEGER PRIMARY KEY, prime_id INTEGER);
       CREATE TABLE prime_user_links (user_id INTEGER, prime_id INTEGER);
       CREATE TABLE tableaux_suivi (id INTEGER PRIMARY KEY, client_id INTEGER, created_at TEXT, archived_at TEXT);
-      CREATE TABLE tableau_rubriques (tableau_id INTEGER, key TEXT, statut TEXT, date TEXT, note TEXT, prochaine_action TEXT, version TEXT);
+      CREATE TABLE tableau_rubriques (tableau_id INTEGER, key TEXT, statut TEXT, date TEXT, note TEXT, prochaine_action TEXT, version TEXT, prochaine_action_echeance TEXT);
       INSERT INTO clients VALUES (1, 10);
       INSERT INTO prime_user_links VALUES (100, 10);
       INSERT INTO tableaux_suivi VALUES (5, 1, 'initial', NULL);
     `);
-    const insert = sqlite.prepare("INSERT INTO tableau_rubriques VALUES (5, ?, 'a_faire', NULL, ?, '', NULL)");
+    const insert = sqlite.prepare("INSERT INTO tableau_rubriques (tableau_id,key,statut,date,note,prochaine_action,version) VALUES (5, ?, 'a_faire', NULL, ?, '', NULL)");
     for (const key of RUBRIQUES) insert.run(key, key === 'routeur' ? 'before transfer' : '');
     let transferred = false;
     const driver = { kind: 'sqlite', sqlite: {

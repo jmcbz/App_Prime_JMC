@@ -8,9 +8,10 @@ test('Prime entre dans la trousse mais les anciennes procédures restent réserv
   assert.doesNotMatch(source('../layout/Sidebar.tsx'), /to !== '\/procedures' \|\| user\?\.role === 'admin'/);
   assert.match(source('./Procedures.tsx'), /user\?\.role === 'admin'/);
 });
-test('éditeur une question à la fois et archives verrouillées', () => {
+test('éditeur par section et archives verrouillées', () => {
   const ui = source('./ClientOnboarding.tsx');
-  assert.match(ui, /activeItems\[questionIndex\]/);
+  assert.doesNotMatch(ui, /activeItems\[questionIndex\]/);
+  assert.match(ui, /activeItems\.map/);
   assert.match(ui, /disabled=\{readOnly/);
   assert.match(ui, /beforeunload/);
   assert.match(ui, /selected\.version/);

@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Menu } from 'lucide-react';
+import { useRef, useState } from 'react';
 import Sidebar from './layout/Sidebar';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -13,10 +14,23 @@ import { useAuth } from './context/AuthContext';
 import type { ReactNode } from 'react';
 
 function ProtectedShell({ children }: { children: ReactNode }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
   return (
     <div className="min-h-screen titan-grid">
-      <Sidebar />
-      <main className="ml-64 min-h-screen">{children}</main>
+      <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-white/10 bg-bz-dark px-4 py-3 text-white md:hidden">
+        <button ref={menuButton} type="button" aria-label="Ouvrir le menu" aria-controls="primary-navigation"
+          aria-expanded={menuOpen} onClick={() => setMenuOpen(open => !open)}
+          className="rounded-lg border border-white/20 p-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-titan-cyan">
+          <Menu className="h-5 w-5" aria-hidden="true" />
+        </button>
+        <span className="text-sm font-extrabold tracking-wide">PRIsME Prime</span>
+      </header>
+      {menuOpen && <button type="button" data-testid="navigation-backdrop" aria-label="Fermer le menu"
+        className="fixed inset-0 z-40 bg-black/60 md:hidden" onClick={() => setMenuOpen(false)} />}
+      <Sidebar mobileOpen={menuOpen} onClose={() => setMenuOpen(false)}
+        onEscape={() => { setMenuOpen(false); menuButton.current?.focus(); }} />
+      <main className="min-h-screen min-w-0 md:ml-64">{children}</main>
     </div>
   );
 }

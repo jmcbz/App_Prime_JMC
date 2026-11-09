@@ -476,7 +476,7 @@ test('saved Fait is read-only but retains history and exports after archive/rest
   Object.assign(globalThis, {window: dom.window, document: dom.window.document});
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   globalThis.__onboardingExports = [];
-  let row = {...record(9), items: [{section_key:'general',section_title:'Général',item_order:1,checked:true,element:'Vérification',notes:'Preuve'}]};
+  let row = {...record(9), items: [{section_key:'general',section_title:'Général',item_order:1,checked:true,element:'Vérification',notes:'Preuve'}, {section_key:'general',section_title:'Général',item_order:2,checked:false,element:'Deuxième vérification',notes:'Autre preuve'}]};
   dom.window.confirm = () => true;
   const requests = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -506,6 +506,9 @@ test('saved Fait is read-only but retains history and exports after archive/rest
     await act(async()=>button('Sauvegarder').click());
     assert.equal(row.statut,'Fait');
     assert.equal(button('Sauvegarder').disabled,true);
+    const lockedQuestions = [...dom.window.document.querySelectorAll('fieldset[data-question-order]')];
+    assert.equal(lockedQuestions.length, 2);
+    assert.ok(lockedQuestions.every(fieldset => [...fieldset.querySelectorAll('input,textarea,select')].every(control => control.matches(':disabled'))), 'all visible questions are locked');
     for(const label of ['Client','Technicien Prime','Statut','Priorité','Titre','Réponse / notes / preuves','Résumé exécutif']) {
       const control=[...dom.window.document.querySelectorAll('label')].find(e=>e.textContent.startsWith(label))?.querySelector('input,select,textarea');
       assert.ok(control?.matches(':disabled'),`${label} is read-only`);
@@ -577,6 +580,8 @@ test('new dossiers retain the template while a populated dossier retains its sav
     await act(async () => root.render(React.createElement(RouterProvider, {router: createMemoryRouter([{path: '/', element: React.createElement(Page)}])})));
     await tick(300);
     assert.match(dom.window.document.body.textContent, /Sections · 0\/123 faits/, 'initial new dossier has the template');
+    assert.equal(dom.window.document.querySelectorAll('nav button').length, 11, 'all eleven template sections are selectable');
+    assert.ok(dom.window.document.querySelectorAll('fieldset[data-question-order]').length > 1, 'template section displays multiple questions');
     await act(async () => [...dom.window.document.querySelectorAll('button')].find(e => e.textContent.includes('Dossier 9')).click());
     assert.match(dom.window.document.body.textContent, /Sections · 1\/1 faits/);
     assert.match(dom.window.document.body.textContent, /Vérification conservée/);
@@ -584,6 +589,64 @@ test('new dossiers retain the template while a populated dossier retains its sav
     assert.deepEqual(savedItems, [item], 'normal dossier saves its persisted checklist, not the template');
     await act(async () => button('Nouvelle').click());
     assert.match(dom.window.document.body.textContent, /Sections · 0\/123 faits/, 'new blank dossier gets the template again');
+  } finally {await act(async () => root.unmount()); Object.assign(globalThis, previous); dom.window.close();}
+});
+
+test('section editor keeps simultaneous edits, item order, and save state across sections', async () => {
+  const dom = new JSDOM('<!doctype html><div id="app"></div>', {url: 'http://localhost/'});
+  const previous = {window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch};
+  Object.assign(globalThis, {window: dom.window, document: dom.window.document});
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const original = [
+    {section_key: 'alpha', section_title: 'Section A', item_order: 3, checked: false, element: 'Question A1', notes: 'Ancienne preuve'},
+    {section_key: 'alpha', section_title: 'Section A', item_order: 7, checked: false, element: 'Question A2', notes: 'À garder', action: 'Action existante'},
+    {section_key: 'beta', section_title: 'Section B', item_order: 12, checked: true, element: 'Question B1', notes: 'Preuve B', statut: 'Fait'},
+  ];
+  let row = {...record(9), items: original};
+  let payload;
+  globalThis.fetch = async (url, options = {}) => {
+    if (url.endsWith('/options')) return Response.json({clients: [{id: 1, nom: 'Client A'}], techniciens: [{id: 2, prenom: 'Test', nom: 'Tech', email: 'test@example.com'}]});
+    if (url === '/api/client-onboardings?archived=false') return Response.json([row]);
+    if (url === '/api/client-onboardings/9' && options.method === 'PUT') {
+      payload = JSON.parse(options.body);
+      row = {...row, ...payload.onboarding, items: payload.items, version: 2};
+      return Response.json(row);
+    }
+    if (url === '/api/client-onboardings/9') return Response.json(row);
+    if (url.includes('/9/history?')) return Response.json({history: [], nextBefore: null});
+    throw Error(`Unexpected ${url}`);
+  };
+  const root = createRoot(dom.window.document.getElementById('app'));
+  const controls = () => [...dom.window.document.querySelectorAll('fieldset[data-question-order]')];
+  const section = title => [...dom.window.document.querySelectorAll('nav button')].find(e => e.textContent.includes(title));
+  try {
+    await act(async () => root.render(React.createElement(RouterProvider, {router: createMemoryRouter([{path: '/', element: React.createElement(Page)}])})));
+    await tick(300);
+    await act(async () => [...dom.window.document.querySelectorAll('button')].find(e => e.textContent.includes('Dossier 9')).click());
+    assert.deepEqual(controls().map(e => e.dataset.questionOrder), ['3', '7'], 'both questions visible at once in original order');
+    await act(async () => {
+      Simulate.change(controls()[0].querySelector('textarea'), {target: {value: 'Preuve A1 modifiée'}});
+      Simulate.change(controls()[0].querySelector('input[type="text"]'), {target: {value: 'Action A1 même cycle'}});
+    });
+    await act(async () => Simulate.change(controls()[1].querySelector('input[type="checkbox"]'), {target: {checked: true}}));
+    await act(async () => Simulate.change(controls()[1].querySelector('input[type="text"]'), {target: {value: 'Action A2 modifiée'}}));
+    assert.match(dom.window.document.body.textContent, /Modifications non sauvegardées/);
+    assert.match(dom.window.document.body.textContent, /Sections · 2\/3 faits/);
+    await act(async () => section('Section B').click());
+    assert.deepEqual(controls().map(e => e.dataset.questionOrder), ['12']);
+    await act(async () => section('Section A').click());
+    assert.equal(controls()[0].querySelector('textarea').value, 'Preuve A1 modifiée');
+    assert.equal(controls()[1].querySelector('input[type="checkbox"]').checked, true);
+    await act(async () => [...dom.window.document.querySelectorAll('button')].find(e => e.textContent === 'Sauvegarder').click());
+    assert.ok(payload, `PUT must occur: ${dom.window.document.body.textContent.slice(0, 500)}`);
+    assert.deepEqual(payload.items.map(i => i.item_order), [3, 7, 12]);
+    assert.equal(payload.items[0].notes, 'Preuve A1 modifiée');
+    assert.equal(payload.items[0].action, 'Action A1 même cycle');
+    assert.equal(payload.items[1].notes, 'À garder');
+    assert.equal(payload.items[1].checked, true);
+    assert.equal(payload.items[1].action, 'Action A2 modifiée');
+    assert.deepEqual(payload.items[2], original[2]);
+    assert.doesNotMatch(dom.window.document.body.textContent, /Modifications non sauvegardées/);
   } finally {await act(async () => root.unmount()); Object.assign(globalThis, previous); dom.window.close();}
 });
 

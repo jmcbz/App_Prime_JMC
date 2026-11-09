@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { LayoutDashboard, Users, Building2, BookOpen, ListChecks, ShieldCheck, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import LogoTitan from '../components/LogoTitan';
@@ -12,9 +12,27 @@ const NAV = [
   { to: '/suivis', label: 'Suivis', icon: ListChecks },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ mobileOpen = false, onClose, onEscape }: {
+  mobileOpen?: boolean;
+  onClose?: () => void;
+  onEscape?: () => void;
+}) {
   const { user, logout } = useAuth();
   const [logoutError, setLogoutError] = useState('');
+  useEffect(() => {
+    if (mobileOpen) document.querySelector<HTMLAnchorElement>('#primary-navigation nav a')?.focus();
+  }, [mobileOpen]);
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onEscape?.();
+        if (!onEscape) onClose?.();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [mobileOpen, onClose, onEscape]);
   const guardedLogout = async () => {
     if (!window.dispatchEvent(new window.Event('client-onboarding:before-logout', { cancelable: true }))) return;
     try { setLogoutError(''); await logout(); }
@@ -22,7 +40,8 @@ export default function Sidebar() {
   };
 
   return (
-    <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-white/10 bg-bz-dark">
+    <aside id="primary-navigation" aria-label="Navigation principale"
+      className={`fixed left-0 top-0 z-50 h-screen w-64 flex-col overflow-y-auto border-r border-white/10 bg-bz-dark md:z-40 md:flex ${mobileOpen ? 'flex' : 'hidden'}`}>
       <div className="flex items-center gap-3 border-b border-white/10 px-6 py-5">
         <LogoTitan size={40} />
         <div>
@@ -37,6 +56,7 @@ export default function Sidebar() {
             key={to}
             to={to}
             end={end}
+            onClick={onClose}
             className={({ isActive }) =>
               `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
                 isActive ? 'bg-bz-blue/15 text-white shadow-titan' : 'text-slate-400 hover:bg-white/5 hover:text-white'
@@ -53,6 +73,7 @@ export default function Sidebar() {
             <div className="px-3 pb-1 pt-4 text-[10px] font-bold uppercase tracking-wider text-slate-600">Administration</div>
             <NavLink
               to="/administration"
+              onClick={onClose}
               className={({ isActive }) =>
                 `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
                   isActive ? 'bg-bz-blue/15 text-white shadow-titan' : 'text-slate-400 hover:bg-white/5 hover:text-white'

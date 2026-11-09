@@ -20,7 +20,7 @@ const expected = { primeId: actor.prime.id, servoClientId: null };
 const input = { nom: 'After', clientType: 'ti', primeId: actor.prime.id };
 const record = { client_id: client.id, technicien_id: actor.user.id, titre: 'Onboarding', statut: 'À faire', priorite: 'Moyenne', compte_rendu: {} };
 const identity = { sub: actor.user.id, role: 'prime', email: actor.user.email };
-const rubrique = { statut: 'en_cours', date: null, note: 'Concurrent', prochaineAction: '', version: null };
+const rubrique = { statut: 'en_cours', date: null, note: 'Concurrent', prochaineAction: '', prochaineActionEcheance: null, version: null };
 
 async function overlapping(onOpen) {
   driver.sqlite.exec("CREATE TRIGGER test_onboarding_abort BEFORE INSERT ON client_onboarding_history BEGIN SELECT RAISE(ABORT, 'injected onboarding failure'); END");

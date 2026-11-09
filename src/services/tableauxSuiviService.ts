@@ -19,6 +19,7 @@ export interface RubriqueSuivi {
   date: string | null;
   note: string | null;
   prochaineAction: string | null;
+  prochaineActionEcheance: string | null;
   version: string | null;
 }
 export interface TableauSuivi {

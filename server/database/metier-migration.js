@@ -37,7 +37,7 @@ const PG_TYPES = {
   client_onboarding_items: { id:'int4',onboarding_id:'int4',item_order:'int4',checked:'bool',echeance:'date',created_at:'timestamp',updated_at:'timestamp',...Object.fromEntries(ITEM_TEXT.map(k=>[k,'text'])) },
   client_onboarding_history: { id:'int4',onboarding_id:'int4',snapshot:'jsonb',actor_id:'int4',actor_email:'text',event_type:'text',created_at:'timestamp' },
   tableaux_suivi: { id: 'int4', client_id: 'int4', created_at: 'timestamp', archived_at: 'timestamp' },
-  tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', version: 'text' },
+  tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', prochaine_action_echeance: 'text', version: 'text' },
 };
 const PG_FOREIGN_KEYS = [
   ['client_onboardings','client_id','clients','id','RESTRICT'],
@@ -67,7 +67,7 @@ const SQLITE_TYPES = {
   client_onboarding_items: { id:'INTEGER',onboarding_id:'INTEGER',item_order:'INTEGER',checked:'INTEGER',echeance:'TEXT',created_at:'TEXT',updated_at:'TEXT',...Object.fromEntries(ITEM_TEXT.map(k=>[k,'TEXT'])) },
   client_onboarding_history: { id:'INTEGER',onboarding_id:'INTEGER',snapshot:'TEXT',actor_id:'INTEGER',actor_email:'TEXT',event_type:'TEXT',created_at:'TEXT' },
   tableaux_suivi: { id: 'INTEGER', client_id: 'INTEGER', created_at: 'TEXT', archived_at: 'TEXT' },
-  tableau_rubriques: { tableau_id: 'INTEGER', key: 'TEXT', statut: 'TEXT', date: 'TEXT', note: 'TEXT', prochaine_action: 'TEXT', version: 'TEXT' },
+  tableau_rubriques: { tableau_id: 'INTEGER', key: 'TEXT', statut: 'TEXT', date: 'TEXT', note: 'TEXT', prochaine_action: 'TEXT', prochaine_action_echeance: 'TEXT', version: 'TEXT' },
 };
 
 function checkOnboardingSet(names) {
@@ -261,6 +261,7 @@ export async function migratePgMetier(pool, createSchema) {
     await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-metier-json-v1'))");
     await checkPgMetierIdentity(connection);
     await createSchema(connection);
+    await connection.query('ALTER TABLE tableau_rubriques ADD COLUMN IF NOT EXISTS prochaine_action_echeance TEXT');
     await (await import('./client-onboardings.js')).createOnboardingSchemaPg(connection);
     const found = await pgColumns(connection);
     const legacy = {};
@@ -308,6 +309,13 @@ export async function migratePgMetier(pool, createSchema) {
 
 function sqliteColumns(sqlite, table) {
   return new Map(sqlite.prepare(`PRAGMA table_info(${table})`).all().map(row => [row.name, row.type]));
+}
+
+// Called inside initDb's schema transaction, after full identity validation.
+export function migrateSqliteRubriqueEcheance(sqlite) {
+  if (!sqliteColumns(sqlite, 'tableau_rubriques').has('prochaine_action_echeance')) {
+    sqlite.exec('ALTER TABLE tableau_rubriques ADD COLUMN prochaine_action_echeance TEXT');
+  }
 }
 
 export function checkSqliteMetierIdentity(sqlite) {

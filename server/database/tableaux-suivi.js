@@ -11,7 +11,7 @@ function shaped(row, rubriques) {
   return { id: row.id, clientId: row.client_id, createdAt: row.created_at,
     archivedAt: row.archived_at ?? null, rubriques: rubriques.map(r => ({
       key: r.key, statut: r.statut, date: r.date, note: r.note,
-      prochaineAction: r.prochaine_action, version: r.version,
+      prochaineAction: r.prochaine_action, prochaineActionEcheance: r.prochaine_action_echeance, version: r.version,
     })) };
 }
 function readOne(driver, id, connection = null) {
@@ -117,6 +117,7 @@ export async function listTableaux(driver, userId, admin) {
   // One statement snapshots ownership and all rubric data together, even during a transfer.
   const sql = `SELECT t.*, r.key AS rubrique_key, r.statut AS rubrique_statut,
     r.date AS rubrique_date, r.note AS rubrique_note, r.prochaine_action AS rubrique_prochaine_action,
+    r.prochaine_action_echeance AS rubrique_prochaine_action_echeance,
     r.version AS rubrique_version
     FROM tableaux_suivi t JOIN clients c ON c.id = t.client_id ${scope}
     JOIN tableau_rubriques r ON r.tableau_id = t.id ${where} ORDER BY t.client_id, t.id`;
@@ -128,17 +129,25 @@ export async function listTableaux(driver, userId, admin) {
     if (!boards.has(row.id)) boards.set(row.id, { row, rubriques: new Map() });
     boards.get(row.id).rubriques.set(row.rubrique_key, {
       key: row.rubrique_key, statut: row.rubrique_statut, date: row.rubrique_date,
-      note: row.rubrique_note, prochaine_action: row.rubrique_prochaine_action, version: row.rubrique_version,
+      note: row.rubrique_note, prochaine_action: row.rubrique_prochaine_action,
+      prochaine_action_echeance: row.rubrique_prochaine_action_echeance, version: row.rubrique_version,
     });
   }
   return [...boards.values()].map(({ row, rubriques }) => shaped(row, RUBRIQUES.map(key => rubriques.get(key))));
 }
 
+function validCalendarDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
+    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+}
+
 export function validateRubrique(key, input) {
   if (!RUBRIQUES.includes(key)) throw failure(400, 'Rubrique invalide');
   if (!input || !STATUTS.has(input.statut) ||
-    (input.date !== null && (typeof input.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(input.date) ||
-      Number.isNaN(Date.parse(`${input.date}T00:00:00Z`)) || new Date(`${input.date}T00:00:00Z`).toISOString().slice(0,10) !== input.date)) ||
+    (input.date !== null && !validCalendarDate(input.date)) ||
+    (input.prochaineActionEcheance !== undefined && input.prochaineActionEcheance !== null &&
+      !validCalendarDate(input.prochaineActionEcheance)) ||
     typeof input.note !== 'string' || typeof input.prochaineAction !== 'string' ||
     (VERSIONS.has(key) ? input.version !== null && typeof input.version !== 'string' : input.version !== null)) {
     throw failure(400, 'Valeurs de rubrique invalides');
@@ -147,6 +156,8 @@ export function validateRubrique(key, input) {
 
 export async function updateRubrique(driver, id, key, input, userId, admin) {
   validateRubrique(key, input);
+  const hasEcheance = input.prochaineActionEcheance !== undefined;
+  const echeance = hasEcheance ? input.prochaineActionEcheance : null;
   if (driver.kind === 'pg') {
     const tx = await driver.pool.connect();
     try {
@@ -161,8 +172,10 @@ export async function updateRubrique(driver, id, key, input, userId, admin) {
       if (!admin && !(await tx.query('SELECT 1 FROM prime_user_links WHERE user_id = $1 AND prime_id = $2', [userId, row.prime_id])).rowCount)
         throw failure(404, 'Tableau introuvable');
       if (row.archived_at !== null) throw failure(409, 'Tableau archivé');
-      await tx.query(`UPDATE tableau_rubriques SET statut=$1, date=$2, note=$3, prochaine_action=$4, version=$5
-        WHERE tableau_id=$6 AND key=$7`, [input.statut, input.date, input.note, input.prochaineAction, input.version, id, key]);
+      await tx.query(`UPDATE tableau_rubriques SET statut=$1, date=$2, note=$3, prochaine_action=$4,
+        prochaine_action_echeance=CASE WHEN $5=1 THEN $6 ELSE prochaine_action_echeance END,
+        version=$7 WHERE tableau_id=$8 AND key=$9`,
+      [input.statut, input.date, input.note, input.prochaineAction, Number(hasEcheance), echeance, input.version, id, key]);
       const board = await readOne(driver, id, tx);
       await tx.query('COMMIT');
       return board;
@@ -175,8 +188,10 @@ export async function updateRubrique(driver, id, key, input, userId, admin) {
     if (!row || (!admin && !driver.sqlite.prepare('SELECT 1 FROM prime_user_links WHERE user_id = ? AND prime_id = ?').get(userId, row.prime_id)))
       throw failure(404, 'Tableau introuvable');
     if (row.archived_at !== null) throw failure(409, 'Tableau archivé');
-    driver.sqlite.prepare(`UPDATE tableau_rubriques SET statut=?, date=?, note=?, prochaine_action=?, version=?
-      WHERE tableau_id=? AND key=?`).run(input.statut, input.date, input.note, input.prochaineAction, input.version, id, key);
+    driver.sqlite.prepare(`UPDATE tableau_rubriques SET statut=?, date=?, note=?, prochaine_action=?,
+      prochaine_action_echeance=CASE WHEN ?=1 THEN ? ELSE prochaine_action_echeance END,
+      version=? WHERE tableau_id=? AND key=?`).run(
+      input.statut, input.date, input.note, input.prochaineAction, Number(hasEcheance), echeance, input.version, id, key);
     return readOne(driver, id);
   }).immediate();
 }
