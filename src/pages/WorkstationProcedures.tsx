@@ -3,6 +3,7 @@ import { Page, PageHeader } from '../layout/Page';
 import { Card } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { generateWorkstationAuditScript, DEFAULT_WORKSTATION_AUDIT_OPTIONS } from '../services/workstationAuditScript';
+import { generateWorkstationProcedureHtml } from '../services/workstationHtmlExport';
 import {
   archiveDossier, createDossier, createTemplate, getDossier, getDossierByRequest, getTemplateByRequest, getStandardTemplate, listDossiers, listTemplates,
   ProcedureApiError, updateDossier, updateTemplate, listWorkstationClients, getAuditTemplateSource, getAuditDossierSource,
@@ -28,6 +29,9 @@ function readPending(id:number|null):Intent|null {
   throw Error('Création en attente illisible : nouvelle création bloquée');
 }
 const mergeById=<T extends {id:number}>(old:T[],incoming:T[])=>[...old,...incoming.filter(item=>!old.some(i=>i.id===item.id))];
+const sameTemplate=(selected:WorkstationTemplate,fresh:WorkstationTemplate)=>
+  selected.id===fresh.id && selected.version===fresh.version && selected.name===fresh.name && selected.clientId===fresh.clientId &&
+  JSON.stringify(selected.sections)===JSON.stringify(fresh.sections);
 type Recovery = { creation: typeof blank; draft: WorkstationDossier | null; model: WorkstationTemplate | null; dirty: boolean; modelDirty: boolean; duplicating: boolean };
 const recovery = new WeakMap<Window, { userId: number | null; snapshot: Recovery | null }>();
 
@@ -37,6 +41,21 @@ export default function WorkstationProcedures() {
 }
 
 function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin: boolean }) {
+  const auth = useAuth();
+  const exportIdentity = useRef<AbortController | null>(null);
+  const activeExport = useRef<AbortSignal | null>(null);
+  const exportLocked = useRef(false);
+  useEffect(() => {
+    if (!auth.verified || auth.loading || auth.user?.id !== userId) return;
+    const controller = new AbortController();
+    exportIdentity.current = controller;
+    return () => { controller.abort(); if (exportIdentity.current === controller) exportIdentity.current = null; };
+  }, [auth.verified, auth.loading, auth.verificationEpoch, auth.user?.id, userId]);
+  useEffect(() => auth.onVerificationStart(() => {
+    exportIdentity.current?.abort();
+    exportIdentity.current = null;
+    if (activeExport.current) { activeExport.current = null; exportLocked.current = false; setBusy(false); }
+  }), [auth.onVerificationStart]);
   // Window-scoped memory survives route remounts, but never crosses an identity change.
   const entry = recovery.get(window);
   if (!entry || entry.userId !== userId) recovery.set(window, { userId, snapshot: null });
@@ -88,8 +107,11 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     const onLink = (event: MouseEvent) => {
       if ((!dirty && !modelDirty && !creationDirty && !busy) || event.defaultPrevented) return;
       const target = event.target;
-      const anchor = target && 'closest' in target ? (target as Element).closest('a[href]') : null;
-      if (anchor && (busy || !window.confirm('Des modifications non sauvegardées seront perdues. Continuer ?'))) event.preventDefault();
+      const anchor = target && 'closest' in target ? (target as Element).closest('a[href]') as HTMLAnchorElement | null : null;
+      if (!anchor) return;
+      // Export blobs are downloads, not page navigation. Only exempt same-origin blob URLs.
+      if (anchor.hasAttribute('download') && anchor.protocol === 'blob:' && new URL(anchor.href).origin === window.location.origin) return;
+      if (busy || !window.confirm('Des modifications non sauvegardées seront perdues. Continuer ?')) event.preventDefault();
     };
     document.addEventListener('click', onLink, true);
     return () => document.removeEventListener('click', onLink, true);
@@ -114,6 +136,14 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     try { await action(); }
     catch (e) { setError(e instanceof ProcedureApiError && e.status === 409 ? `Conflit de version : ${message(e)}. Vos modifications sont conservées; rechargez après les avoir copiées ou réessayez après vérification.` : message(e)); }
     finally { locked.current = false; setBusy(false); }
+  };
+  const runExport = async (action: (signal: AbortSignal) => Promise<void>) => {
+    const signal = exportIdentity.current?.signal;
+    if (locked.current || exportLocked.current || !signal || signal.aborted || !auth.verified || auth.loading || auth.user?.id !== userId) return;
+    exportLocked.current = true; activeExport.current = signal; setBusy(true); setError(''); setNotice('');
+    try { await action(signal); }
+    catch (e) { if (!signal.aborted) setError(message(e)); }
+    finally { if (activeExport.current === signal) { activeExport.current = null; exportLocked.current = false; setBusy(false); } }
   };
   const finishIntent=(intent:Intent,item:WorkstationDossier|WorkstationTemplate,editorAtStart:number,creationAtStart:number,ownsDraft=false)=>{
     const stored=readPending(userId);
@@ -218,7 +248,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
   const progress = draft ? draft.sections.flatMap(s => s.steps).reduce((v, step) => ({ done: v.done + Number(step.etat === 'fait'), total: v.total + Number(step.etat !== 'na') }), { done: 0, total: 0 }) : null;
   const updateScript = (key: keyof typeof script, value: string) => { scriptRevision.current++; setScript(current => ({ ...current, [key]: value })); };
   const downloadScript = () => {
-    if (locked.current) return;
+    if (locked.current || exportLocked.current) return;
     if (draft && dirty) { setError('Sauvegardez le dossier avant de générer son audit.'); return; }
     if (!draft && modelDirty) { setError('Sauvegardez le modèle ou annulez vos modifications en rouvrant le modèle avant de générer le script.'); return; }
     if (pending || pendingInvalid) { setError('Confirmez la création en attente avant de générer son audit.'); return; }
@@ -229,11 +259,12 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     const creationAtStart = creationRevision.current;
     const scriptAtStart = scriptRevision.current;
     const settings = { ...script };
-    void run(async () => {
+    void runExport(async (signal) => {
       let clientName: string;
       let procedure: { name: string; sections: TemplateSection[] | DossierSection[] };
       if (draft) {
         const fresh = await getAuditDossierSource(draft.id); // Recheck assignment and the saved snapshot before download.
+        if (signal.aborted) return;
         if (selectionRevision !== requestId.current || scriptAtStart !== scriptRevision.current) return;
         if (fresh.id !== draft.id || fresh.clientId !== draft.clientId || fresh.version !== draft.version || JSON.stringify(fresh.sections) !== JSON.stringify(draft.sections)) {
           throw new Error('Dossier modifié depuis son ouverture : rechargez-le avant de générer le script.');
@@ -243,7 +274,9 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
         procedure = { name: `Dossier d’installation — ${fresh.employee || fresh.computer || 'poste'}`, sections: fresh.sections };
       } else {
         const source = await getAuditTemplateSource(selectedClient!.id, selectedTemplate!.id);
+        if (signal.aborted) return;
         if (selectionRevision !== requestId.current || creationAtStart !== creationRevision.current || scriptAtStart !== scriptRevision.current) return;
+        if (!sameTemplate(selectedTemplate!, source.template)) throw Error('Modèle modifié depuis sa sélection : rechargez-le avant de générer le script.');
         clientName = source.client.nom;
         procedure = { name: source.template.name, sections: source.template.sections };
       }
@@ -253,10 +286,48 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
         printerName: settings.printer, apps: settings.apps.split('\n').map(v => v.trim()).filter(Boolean),
         procedure,
       });
-      if (selectionRevision !== requestId.current || (!draft && creationAtStart !== creationRevision.current) || scriptAtStart !== scriptRevision.current) return;
+      if (signal.aborted || selectionRevision !== requestId.current || (!draft && creationAtStart !== creationRevision.current) || scriptAtStart !== scriptRevision.current) return;
       const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
       const a = document.createElement('a'); a.href = url; a.download = 'audit-poste-windows.ps1'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       setNotice(`Script généré pour ${clientName} selon ${procedure.name}.`);
+    });
+  };
+  const downloadHtml = () => {
+    if (locked.current || exportLocked.current) return;
+    if (draft && dirty) { setError('Sauvegardez le dossier avant de télécharger sa procédure HTML.'); return; }
+    if (!draft && modelDirty) { setError('Sauvegardez le modèle ou annulez vos modifications avant de télécharger sa procédure HTML.'); return; }
+    if (pending || pendingInvalid) { setError('Confirmez la création en attente avant de télécharger la procédure HTML.'); return; }
+    const selectedClient = clients.find(c => String(c.id) === creation.clientId && c.clientType === 'ti');
+    const selectedTemplate = templates.find(t => String(t.id) === creation.templateId);
+    if (!draft && (!selectedClient || !selectedTemplate)) { setError('Choisissez un client TI et son modèle pour télécharger la procédure HTML.'); return; }
+    const selectionRevision = requestId.current;
+    const creationAtStart = creationRevision.current;
+    void runExport(async (signal) => {
+      let html: string;
+      let clientName: string;
+      if (draft) {
+        const fresh = await getAuditDossierSource(draft.id);
+        if (signal.aborted) return;
+        if (selectionRevision !== requestId.current) return;
+        const metadata = ['clientName', 'employee', 'computer', 'ticket', 'date', 'archivedAt'] as const;
+        if (fresh.id !== draft.id || fresh.clientId !== draft.clientId || fresh.version !== draft.version ||
+            metadata.some(key => fresh[key] !== draft[key]) || JSON.stringify(fresh.sections) !== JSON.stringify(draft.sections)) {
+          throw new Error('Dossier modifié depuis son ouverture : rechargez-le avant de télécharger la procédure HTML.');
+        }
+        clientName = fresh.clientName;
+        html = generateWorkstationProcedureHtml({ kind: 'dossier', dossier: fresh });
+      } else {
+        const source = await getAuditTemplateSource(selectedClient!.id, selectedTemplate!.id);
+        if (signal.aborted) return;
+        if (selectionRevision !== requestId.current || creationAtStart !== creationRevision.current) return;
+        if (!sameTemplate(selectedTemplate!, source.template)) throw Error('Modèle modifié depuis sa sélection : rechargez-le avant de télécharger la procédure HTML.');
+        clientName = source.client.nom;
+        html = generateWorkstationProcedureHtml({ kind: 'template', clientName, template: source.template });
+      }
+      if (signal.aborted || selectionRevision !== requestId.current || (!draft && creationAtStart !== creationRevision.current)) return;
+      const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+      const a = document.createElement('a'); a.href = url; a.download = 'procedure-installation-poste.html'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice(`Procédure HTML générée pour ${clientName}. Vérifiez les téléchargements de votre navigateur.`);
     });
   };
   return <Page>
@@ -301,6 +372,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
       {draft.sections.map((section: DossierSection, i) => <section key={i} className="mt-5"><h3 className="mb-2 font-semibold text-white print:text-black">{section.title}</h3>{section.steps.map((step, j) => <div key={step.id} className="workstation-print-area mb-3 rounded-lg border border-white/10 p-3 print:border-black"><div className="font-medium text-white print:text-black">{step.title}</div>{step.note && <p className="text-sm text-slate-400 print:text-black">{step.note}</p>}<div className="mt-2 grid gap-2 sm:grid-cols-[auto_1fr]"><label className="text-xs text-slate-300 print:text-black">État<select aria-label={`État — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.etat} disabled={!!draft.archivedAt} onChange={e => mutateDossier(d => { d.sections[i].steps[j].etat = e.target.value as 'todo' | 'fait' | 'na'; })}><option value="todo">À faire</option><option value="fait">Fait</option><option value="na">N/A</option></select><span className="workstation-print-answer hidden">{{todo:'À faire',fait:'Fait',na:'N/A'}[step.etat]}</span></label><label className="text-xs text-slate-300 print:text-black">Commentaire<textarea aria-label={`Commentaire — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.commentaire} disabled={!!draft.archivedAt} onChange={e => mutateDossier(d => { d.sections[i].steps[j].commentaire = e.target.value; })} /><span className="workstation-print-answer hidden">{step.commentaire}</span></label></div></div>)}</section>)}
       {!draft.archivedAt && <div className="flex flex-wrap gap-2 print:hidden"><button className={buttonClass} disabled={busy || !dirty} onClick={saveDossier}>Sauvegarder le dossier</button><button className={buttonClass} disabled={busy || dirty} onClick={archive}>Archiver le dossier</button></div>}
     </fieldset></Card>}
+    <Card className="my-5 print:hidden"><h2 className="text-lg font-semibold text-white">Procédure HTML hors ligne</h2><p className="my-2 text-sm text-slate-300">Téléchargez la procédure du dossier enregistré ouvert ou du modèle choisi pour le client TI. Le fichier autonome est consultable et imprimable, sans modifier le dossier partagé dans Prime.</p><button className={`${buttonClass} mt-2`} disabled={busy} onClick={downloadHtml}>Télécharger la procédure HTML</button></Card>
     <Card className="my-5 print:hidden"><h2 className="text-lg font-semibold text-white">Générateur de script d’audit Windows</h2><p className="my-2 text-sm text-amber-300">Le script valide uniquement des éléments du poste Windows. Installation, configuration et autres tâches manuelles restent à vérifier par le technicien. Aucun script n’est exécuté dans le navigateur ou sur le serveur.</p>
       <p role="status" className="my-2 text-sm text-slate-200">Source : {draft ? `dossier enregistré de ${draft.clientName} (procédure figée)` : `modèle ${templates.find(t => String(t.id) === creation.templateId)?.name ?? 'à choisir'} du client ${clients.find(c => String(c.id) === creation.clientId)?.nom ?? 'à choisir'}`}.</p>
       <p className="my-2 text-xs text-amber-300">Les paramètres préremplis sont ceux de BZ : confirmez le préfixe, le compte, le clavier, l’imprimante et les applications pour ce client avant de télécharger. Les étapes non automatisables resteront à vérifier.</p>

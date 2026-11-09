@@ -11,7 +11,7 @@ import {unlink, readFile} from 'node:fs/promises';
 const outfile = new URL('./.workstation-ui-test.mjs', import.meta.url).pathname;
 await build({entryPoints:[new URL('./WorkstationProcedures.tsx', import.meta.url).pathname], outfile, bundle:true, format:'esm', platform:'node', packages:'external', jsx:'automatic', plugins:[{name:'auth-and-script',setup(p){
   p.onResolve({filter:/context\/AuthContext$/},()=>({path:'auth',namespace:'fixture'}));
-  p.onLoad({filter:/./,namespace:'fixture'},()=>({contents:'export const useAuth = () => ({user:{id:globalThis.__workstationUserId||1,role:globalThis.__workstationRole||"admin"}})',loader:'js'}));
+  p.onLoad({filter:/./,namespace:'fixture'},()=>({contents:'export const useAuth = () => ({user: globalThis.__workstationAuth ? globalThis.__workstationAuth.user : {id:globalThis.__workstationUserId||1,role:globalThis.__workstationRole||"admin"}, verified:globalThis.__workstationAuth?.verified ?? true, loading:globalThis.__workstationAuth?.loading ?? false, verificationEpoch:globalThis.__workstationAuth?.epoch ?? 0, onVerificationStart:globalThis.__workstationAuth?.subscribe ?? (()=>()=>{})})',loader:'js'}));
   p.onResolve({filter:/workstationAuditScript$/},()=>({path:'script',namespace:'script-fixture'}));
   p.onLoad({filter:/./,namespace:'script-fixture'},()=>({contents:'export const DEFAULT_WORKSTATION_AUDIT_OPTIONS={clientName:"BZ",computerPrefix:"PC-",adminLocal:"bzinc",keyboards:["fr-CA"],printerName:"",apps:[]};export const generateWorkstationAuditScript = config => { globalThis.__scriptConfig = config; return "# Test PS1"; };',loader:'js'}));
 }}]});
@@ -21,10 +21,14 @@ const template = {id:3,clientId:null,name:'Standard Windows',version:1,sections:
 const dossier = {id:11,clientId:2,clientName:'Acme TI',templateId:3,employee:'Alice',computer:'PC-1',ticket:'T-1',date:'2026-11-09',version:1,archivedAt:null,sections:[{title:'Préparation',steps:[{id:'s1',title:'Clavier',note:'Vérifier FR',etat:'todo',commentaire:''}]}]};
 function fixture({dossiers=[],templates=[template],putStatus=200,browserRouter=false,override,pendingSeed}={}) {
   const dom = new JSDOM('<!doctype html><div id="app"></div>',{url:browserRouter?'http://localhost/procedures/installation-postes':'http://localhost/'});
+  dom.window.URL.revokeObjectURL=()=>{};
   const old={window:globalThis.window,document:globalThis.document,fetch:globalThis.fetch,Blob:globalThis.Blob,URL:globalThis.URL};
   Object.assign(globalThis,{window:dom.window,document:dom.window.document,Blob:dom.window.Blob,URL:dom.window.URL});
   if(pendingSeed)dom.window.sessionStorage.setItem('workstation-procedures:pending-create:1',JSON.stringify(pendingSeed));
   globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+  const listeners=new Set();
+  const auth={user:{id:globalThis.__workstationUserId||1,role:globalThis.__workstationRole||'admin'},verified:true,loading:false,epoch:0,subscribe:listener=>{listeners.add(listener);return()=>listeners.delete(listener);},start(){for(const listener of listeners)listener();this.verified=false;this.loading=true;this.epoch++;}};
+  globalThis.__workstationAuth=auth;
   const requests=[];
   globalThis.fetch=async (url,options={})=>{
     const method=options.method||'GET'; const body=options.body&&JSON.parse(options.body);
@@ -49,8 +53,8 @@ function fixture({dossiers=[],templates=[template],putStatus=200,browserRouter=f
   const render=async()=>{await act(async()=>root.render(browserRouter?React.createElement(BrowserRouter,{future:{v7_startTransition:true,v7_relativeSplatPath:true}},React.createElement('nav',null,React.createElement(Link,{to:'/clients'},'Clients')),React.createElement(Routes,null,React.createElement(Route,{path:'/procedures/installation-postes',element:React.createElement(Page)}),React.createElement(Route,{path:'/clients',element:React.createElement('p',null,'Page clients')}))):React.createElement(Page)));};
   const input=async(label,value)=>{const el=[...dom.window.document.querySelectorAll('input,textarea,select')].find(e=>e.getAttribute('aria-label')===label);assert.ok(el,`Missing input ${label}`);await act(async()=>{const proto=el.tagName==='TEXTAREA'?dom.window.HTMLTextAreaElement.prototype:el.tagName==='SELECT'?dom.window.HTMLSelectElement.prototype:dom.window.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,value);el.dispatchEvent(new dom.window.Event('input',{bubbles:true}));el.dispatchEvent(new dom.window.Event('change',{bubbles:true}));Simulate.change(el,{target:{value}});});};
   const click=async(text)=>{const el=[...dom.window.document.querySelectorAll('button')].find(e=>e.textContent.trim().startsWith(text));assert.ok(el,`Missing button ${text}`);await act(async()=>el.click());};
-  const cleanup=async()=>{await act(async()=>root.unmount());Object.assign(globalThis,old);dom.window.close();};
-  return {dom,requests,render,input,click,cleanup};
+  const cleanup=async()=>{await act(async()=>root.unmount());delete globalThis.__workstationAuth;Object.assign(globalThis,old);dom.window.close();};
+  return {dom,requests,render,input,click,cleanup,auth};
 }
 
 test('Prime tools exposes the workstation editor route',async()=>{
@@ -181,11 +185,87 @@ test('Prime duplicates the global standard into an explicitly selected TI client
 
 test('unfinished creation metadata is guarded when switching editors',async()=>{const f=fixture();try{await f.render();await f.input('Employé','À conserver');f.dom.window.confirm=()=>false;await f.click('Nouveau modèle');assert.ok(!f.dom.window.document.querySelector('[aria-label="Nom du modèle"]'));assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]').value,'À conserver');}finally{await f.cleanup();}});
 
+test('script download link is not canceled by the page navigation guard while export is busy',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blocked;URL.createObjectURL=()=> 'blob:http://localhost/fixture';f.dom.window.HTMLAnchorElement.prototype.click=function(){this.addEventListener('click',e=>{blocked=e.defaultPrevented;e.preventDefault();},{once:true});this.dispatchEvent(new f.dom.window.MouseEvent('click',{bubbles:true,cancelable:true}));};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.equal(blocked,false,'download anchor must reach Chrome without preventDefault');}finally{URL.createObjectURL=oldCreate;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}});
+
+test('download attribute on an external link cannot bypass the unsaved-edit navigation guard',async()=>{const f=fixture({dossiers:[dossier]});try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','À conserver');f.dom.window.confirm=()=>false;const anchor=f.dom.window.document.createElement('a');anchor.href='https://example.org/leave';anchor.download='fichier.html';f.dom.window.document.body.append(anchor);const event=new f.dom.window.MouseEvent('click',{bubbles:true,cancelable:true});anchor.dispatchEvent(event);assert.equal(event.defaultPrevented,true);}finally{await f.cleanup();}});
+
+test('downloads a self-contained HTML procedure from the authorized client model',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob,filename;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){filename=this.download;};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la procédure HTML');assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));assert.equal(filename,'procedure-installation-poste.html');assert.ok(blob,'HTML file should be created');const html=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error);reader.readAsText(blob);});assert.match(html,/<!doctype html>/i);assert.match(html,/Standard Windows/);assert.match(html,/Acme TI/);assert.match(html,/Clavier/);assert.match(html,/Vérifier FR/);}finally{URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}});
+
+test('exports saved dossier HTML with recorded answers and never substitutes the model',async()=>{const saved={...dossier,sections:[{title:'Section du dossier',steps:[{id:'saved-only',title:'Installation terminée',note:'Vérifiée',etat:'fait',commentaire:'Prêt à livrer'}]}]};const f=fixture({dossiers:[saved]});const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.click('Télécharger la procédure HTML');assert.ok(f.requests.some(r=>r.url==='/api/workstation-procedures/audit-source/dossier/11'));assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));assert.ok(blob);const html=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error);reader.readAsText(blob);});assert.match(html,/Installation terminée/);assert.match(html,/Prêt à livrer/);assert.doesNotMatch(html,/Clavier/);}finally{URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}});
+
+test('HTML export refuses unsaved dossier changes and assignment-denied snapshots',async()=>{const f=fixture({dossiers:[dossier],override:({url})=>url==='/api/workstation-procedures/audit-source/dossier/11'?Response.json({error:'Accès refusé'},{status:403}):undefined});const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','À sauvegarder');await f.click('Télécharger la procédure HTML');assert.equal(blobs,0);assert.match(f.dom.window.document.body.textContent,/Sauvegardez le dossier/);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source/')));await f.click('Sauvegarder le dossier');await f.click('Télécharger la procédure HTML');assert.equal(blobs,0);assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Accès refusé/);}finally{URL.createObjectURL=oldCreate;await f.cleanup();}});
+
+test('denied HTML template source never falls back to a listed model or creates a Blob',async()=>{
+  const f=fixture({override:({url})=>url.includes('/audit-source?')?Response.json({error:'Accès refusé'},{status:403}):undefined});
+  const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};
+  try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la procédure HTML');assert.equal(blobs,0);assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Accès refusé/);}
+  finally{URL.createObjectURL=oldCreate;await f.cleanup();}
+});
+
+test('HTML and PS1 refuse a server-changed selected template and ask to reload',async()=>{
+  for(const format of ['Télécharger la procédure HTML','Télécharger le script .ps1'])for(const changed of [
+    {...template,version:2},{...template,name:'Modèle modifié'},
+    {...template,clientId:2},{...template,sections:[{title:'Nouvelle section',steps:[]}]}
+  ]){
+    const f=fixture({override:({url})=>url.includes('/audit-source?')?Response.json({client:{id:2,nom:'Acme TI'},template:changed}):undefined});
+    const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};
+    try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click(format);assert.equal(blobs,0,`${format}: ${JSON.stringify(changed)}`);assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/rechargez/i);}
+    finally{URL.createObjectURL=oldCreate;await f.cleanup();}
+  }
+});
+
+test('verification-start synchronously cancels deferred HTML and PS1 exports, even after same-account re-arm',async()=>{
+  for(const format of ['Télécharger la procédure HTML','Télécharger le script .ps1'])for(const useDossier of [false,true]){
+    let release;const gate=new Promise(resolve=>{release=resolve;});
+    const f=fixture({dossiers:useDossier?[dossier]:[],override:({url})=>url.includes('/audit-source')?gate.then(()=>url.includes('/dossier/')?Response.json({dossier}):Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
+    const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};
+    try{
+      await f.render();if(useDossier)await f.click('Ouvrir Alice · Acme TI');else{await f.input('Client','2');await f.input('Modèle','3');}
+      await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent===format).click());
+      await act(async()=>{f.auth.start();});
+      f.auth.loading=false; // /me failed: the old editor is still mounted.
+      await act(async()=>release());
+      assert.equal(blobs,0,`${format} must not download after failed verification`);
+      await f.click(format);assert.equal(blobs,0,'failed /me cannot start a new export');
+      f.auth.verified=true;f.auth.epoch++;await f.render();
+      await f.click(format);assert.equal(blobs,1,'same-account confirmed /me re-arms export');
+    }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
+  }
+});
+
+test('an old deferred response cannot download after same-account revalidation re-arms a newer export',async()=>{
+  for(const format of ['Télécharger la procédure HTML','Télécharger le script .ps1']){
+    let releaseOld,reads=0;const oldGate=new Promise(resolve=>{releaseOld=resolve;});
+    const f=fixture({override:({url})=>url.includes('/audit-source?')?(++reads===1?oldGate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
+    const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blobs=0;
+    URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};
+    try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent===format).click());
+      await act(async()=>{f.auth.start();});f.auth.verified=true;f.auth.loading=false;await f.render();
+      await f.click(format);assert.equal(blobs,1,'confirmed new export completes despite prior request');
+      await act(async()=>releaseOld());assert.equal(blobs,1,'old response cannot download even after re-arm');
+    }finally{releaseOld();URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}
+  }
+});
+
+test('account switch or logout invalidates an in-flight HTML export before its response',async()=>{
+  for(const next of [{id:2,role:'admin'},null]){
+    let release;const gate=new Promise(resolve=>{release=resolve;});
+    const f=fixture({override:({url})=>url.includes('/audit-source?')?gate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
+    const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};
+    try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la procédure HTML').click());
+      await act(async()=>{f.auth.start();f.auth.user=next;f.auth.verified=true;f.auth.loading=false;});await f.render();await act(async()=>release());
+      assert.equal(blobs,0);assert.equal(f.auth.user?.id,next?.id);
+    }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
+  }
+});
+
+test('changing model while the HTML source is pending cancels the old export',async()=>{let release;const gate=new Promise(resolve=>{release=resolve;});const alternate={...template,id:8,name:'Autre modèle'};const f=fixture({templates:[template,alternate],override:({url})=>url.includes('/audit-source?')?gate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la procédure HTML').click());await f.input('Modèle','8');await act(async()=>release());assert.equal(blobs,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'8');}finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}});
+
 test('PowerShell download starts with a UTF-8 BOM before script text',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.ok(blob);const bytes=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(new Uint8Array(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsArrayBuffer(blob);});assert.deepEqual([...bytes].slice(0,6),[0xef,0xbb,0xbf,0x23,0x20,0x54]);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
 
 test('BrowserRouter back and forward recovers unsaved dossier edits after route unmount',async()=>{const f=fixture({dossiers:[dossier],browserRouter:true});try{await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','À conserver');f.dom.window.confirm=()=>true;await act(async()=>f.dom.window.document.querySelector('nav a').click());assert.match(f.dom.window.document.body.textContent,/Page clients/);await act(async()=>{f.dom.window.history.back();await new Promise(resolve=>setTimeout(resolve,30));});assert.equal(f.dom.window.location.pathname,'/procedures/installation-postes');assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]')?.value,'À conserver');await act(async()=>{f.dom.window.history.forward();await new Promise(resolve=>setTimeout(resolve,30));});assert.match(f.dom.window.document.body.textContent,/Page clients/);await act(async()=>{f.dom.window.history.back();await new Promise(resolve=>setTimeout(resolve,30));});assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]')?.value,'À conserver');}finally{await f.cleanup();}});
 
-test('BrowserRouter restored edits never appear for another signed-in identity',async()=>{const f=fixture({dossiers:[dossier],browserRouter:true});try{globalThis.__workstationUserId=1;await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','Secret utilisateur 1');f.dom.window.confirm=()=>true;await act(async()=>f.dom.window.document.querySelector('nav a').click());globalThis.__workstationUserId=2;await act(async()=>{f.dom.window.history.back();await new Promise(resolve=>setTimeout(resolve,30));});assert.ok(!f.dom.window.document.body.textContent.includes('Secret utilisateur 1'));assert.ok(!f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]'));await f.click('Ouvrir Alice · Acme TI');assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]').value,'');}finally{globalThis.__workstationUserId=1;await f.cleanup();}});
+test('BrowserRouter restored edits never appear for another signed-in identity',async()=>{const f=fixture({dossiers:[dossier],browserRouter:true});try{globalThis.__workstationUserId=1;await f.render();await f.click('Ouvrir Alice · Acme TI');await f.input('Commentaire — Clavier','Secret utilisateur 1');f.dom.window.confirm=()=>true;await act(async()=>f.dom.window.document.querySelector('nav a').click());globalThis.__workstationUserId=2;f.auth.user={id:2,role:'admin'};await act(async()=>{f.dom.window.history.back();await new Promise(resolve=>setTimeout(resolve,30));});assert.ok(!f.dom.window.document.body.textContent.includes('Secret utilisateur 1'));assert.ok(!f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]'));await f.click('Ouvrir Alice · Acme TI');assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]').value,'');}finally{globalThis.__workstationUserId=1;await f.cleanup();}});
 
 test('BrowserRouter restores unfinished creation and template edits across history',async()=>{const f=fixture({browserRouter:true});try{await f.render();await f.input('Employé','Brouillon création');f.dom.window.confirm=()=>true;await f.click('Nouveau modèle');await f.input('Nom du modèle','Brouillon modèle');await act(async()=>f.dom.window.document.querySelector('nav a').click());await act(async()=>{f.dom.window.history.back();await new Promise(resolve=>setTimeout(resolve,30));});assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]')?.value,'Brouillon création');assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]')?.value,'Brouillon modèle');}finally{await f.cleanup();}});
 
