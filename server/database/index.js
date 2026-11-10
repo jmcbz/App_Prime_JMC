@@ -12,6 +12,7 @@ import * as workstation from './workstation-procedures.js';
 import { createOnboardingSchemaSqlite, createOnboardingSchemaPg } from './client-onboardings.js';
 import { guardSqlite, withSqliteOwner } from './sqlite-isolation.js';
 import { backfillTableaux, createInitialTableauSqlite, createTableauForClient, listTableaux as listTableauxRows, updateRubrique as updateRubriqueRow } from './tableaux-suivi.js';
+import * as suiviComplements from './suivi-complements.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USE_PG = Boolean(process.env.DATABASE_URL);
@@ -138,6 +139,16 @@ function createSchemaSqlite(sqlite) {
     );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
+    CREATE TABLE IF NOT EXISTS suivi_complements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      suivi_id INTEGER NOT NULL REFERENCES suivis(id) ON DELETE RESTRICT,
+      author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      statut TEXT NOT NULL CHECK (statut IN ('a_faire','en_cours','bloque','termine')),
+      echeance TEXT,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_suivi_complements_history ON suivi_complements(suivi_id,id DESC);
     CREATE TABLE IF NOT EXISTS tableaux_suivi (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -207,6 +218,16 @@ async function createSchemaPg(pool) {
     );
     CREATE INDEX IF NOT EXISTS idx_clients_prime ON clients(prime_id);
     CREATE INDEX IF NOT EXISTS idx_suivis_client ON suivis(client_id);
+    CREATE TABLE IF NOT EXISTS suivi_complements (
+      id SERIAL PRIMARY KEY,
+      suivi_id INTEGER NOT NULL REFERENCES suivis(id) ON DELETE RESTRICT,
+      author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      statut TEXT NOT NULL CHECK (statut IN ('a_faire','en_cours','bloque','termine')),
+      echeance TEXT,
+      note TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_suivi_complements_history ON suivi_complements(suivi_id,id DESC);
     CREATE TABLE IF NOT EXISTS tableaux_suivi (
       id SERIAL PRIMARY KEY,
       client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -877,22 +898,20 @@ function suiviData({ titre, statut, echeance, note }) {
 }
 
 export async function listSuivis() {
-  return (await selectAll('suivis', 'id ASC')).map(normalizeSuivi);
+  const sql=suiviComplements.listSql(driver.kind==='pg',false);
+  const rows=driver.kind==='pg'?(await driver.pool.query(sql)).rows:driver.sqlite.prepare(sql).all();
+  return rows.map(row=>suiviComplements.effective(row,normalizeSuivi));
 }
 
 export async function listSuivisForUser(userId) {
-  const sql = `SELECT s.*, CASE WHEN s.client_id IS NULL THEN s.prime_id ELSE c.prime_id END AS effective_prime_id
-    FROM suivis s
-    LEFT JOIN clients c ON c.id = s.client_id
-    JOIN prime_user_links link ON link.prime_id =
-      CASE WHEN s.client_id IS NULL THEN s.prime_id ELSE c.prime_id END
-    WHERE link.user_id = ${driver.kind === 'pg' ? '$1' : '?'}
-    ORDER BY s.id`;
+  const sql = suiviComplements.listSql(driver.kind==='pg',true);
   const rows = driver.kind === 'pg'
     ? (await driver.pool.query(sql, [userId])).rows
     : driver.sqlite.prepare(sql).all(userId);
-  return rows.map((row) => ({ ...normalizeSuivi(row), primeId: row.effective_prime_id }));
+  return rows.map((row) => ({ ...suiviComplements.effective(row,normalizeSuivi), primeId: row.effective_prime_id }));
 }
+export async function listSuiviComplements(id,actor,before) {return suiviComplements.history(driver,id,actor,before);}
+export async function addSuiviComplement(id,actor,input) {return suiviComplements.append(driver,id,actor,input,normalizeSuivi);}
 
 export async function createSuivi(input, connection = null) {
   return normalizeSuivi(await insertJsonRow('suivis', suiviData(input), { client_id: input.clientId ?? null, prime_id: input.primeId ?? null }, connection));

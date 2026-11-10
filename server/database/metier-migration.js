@@ -19,6 +19,7 @@ const BOARD_COLUMNS = {
   client_onboarding_history: ['id','onboarding_id','event_type','snapshot','actor_id','actor_email','created_at'],
   tableaux_suivi: ['id', 'client_id', 'created_at', 'archived_at'],
   tableau_rubriques: ['tableau_id', 'key', 'statut', 'date', 'note', 'prochaine_action', 'version'],
+  suivi_complements: ['id','suivi_id','author_id','statut','echeance','note','created_at'],
 };
 const ONBOARDING_TEXT = ['titre','statut','priorite','urgence_ti','site_principal','contact_principal','periode_couverte','prepare_pour','avancement_global','risques_critiques','actions_ouvertes','decisions_requises','prochaine_rencontre','created_by_email','updated_by_email'];
 const ITEM_TEXT = ['section_key','section_title','priorite','statut','element','notes','action','responsable'];
@@ -42,6 +43,7 @@ const PG_TYPES = {
   client_onboarding_history: { id:'int4',onboarding_id:'int4',snapshot:'jsonb',actor_id:'int4',actor_email:'text',event_type:'text',created_at:'timestamp' },
   tableaux_suivi: { id: 'int4', client_id: 'int4', created_at: 'timestamp', archived_at: 'timestamp' },
   tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', prochaine_action_echeance: 'text', version: 'text' },
+  suivi_complements: { id:'int4', suivi_id:'int4', author_id:'int4', statut:'text', echeance:'text', note:'text', created_at:'timestamp' },
 };
 const PG_FOREIGN_KEYS = [
   ['workstation_templates','client_id','clients','id','RESTRICT'],
@@ -60,6 +62,8 @@ const PG_FOREIGN_KEYS = [
   ['clients', 'prime_id', 'primes', 'id', 'SET NULL'],
   ['suivis', 'client_id', 'clients', 'id', 'CASCADE'],
   ['suivis', 'prime_id', 'primes', 'id', 'SET NULL'],
+  ['suivi_complements', 'suivi_id', 'suivis', 'id', 'RESTRICT'],
+  ['suivi_complements', 'author_id', 'users', 'id', 'RESTRICT'],
   ['tableaux_suivi', 'client_id', 'clients', 'id', 'CASCADE'],
   ['tableau_rubriques', 'tableau_id', 'tableaux_suivi', 'id', 'CASCADE'],
 ];
@@ -77,6 +81,7 @@ const SQLITE_TYPES = {
   client_onboarding_history: { id:'INTEGER',onboarding_id:'INTEGER',snapshot:'TEXT',actor_id:'INTEGER',actor_email:'TEXT',event_type:'TEXT',created_at:'TEXT' },
   tableaux_suivi: { id: 'INTEGER', client_id: 'INTEGER', created_at: 'TEXT', archived_at: 'TEXT' },
   tableau_rubriques: { tableau_id: 'INTEGER', key: 'TEXT', statut: 'TEXT', date: 'TEXT', note: 'TEXT', prochaine_action: 'TEXT', prochaine_action_echeance: 'TEXT', version: 'TEXT' },
+  suivi_complements: { id:'INTEGER', suivi_id:'INTEGER', author_id:'INTEGER', statut:'TEXT', echeance:'TEXT', note:'TEXT', created_at:'TEXT' },
 };
 
 function checkOnboardingSet(names) {

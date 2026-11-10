@@ -427,6 +427,28 @@ app.get('/api/suivis', auth.requireAuth, async (req, res) => {
   try { res.json({ suivis: req.auth.role === 'admin' ? await db.listSuivis() : await db.listSuivisForUser(req.auth.sub) }); }
   catch (e) { handleError(res, e, 'Erreur chargement des suivis'); }
 });
+function suiviId(req) {
+  if (!/^[1-9]\d*$/.test(req.params.id)) throw Object.assign(new Error('Identifiant invalide'),{statusCode:400});
+  const id=Number(req.params.id);
+  if (!Number.isSafeInteger(id)) throw Object.assign(new Error('Identifiant invalide'),{statusCode:400});
+  return id;
+}
+function complementError(res,error) {
+  if (error.statusCode) return res.status(error.statusCode).json({error:error.message});
+  return handleError(res,error,'Erreur complément de suivi');
+}
+app.get('/api/suivis/:id/complements', auth.requireAuth, async(req,res)=>{
+  try {
+    const raw=req.query.before;
+    if (raw !== undefined && (typeof raw !== 'string' || !/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw))))
+      return res.status(400).json({error:'Curseur invalide'});
+    res.json(await db.listSuiviComplements(suiviId(req),req.auth,raw===undefined?null:Number(raw)));
+  } catch(error) {complementError(res,error);}
+});
+app.post('/api/suivis/:id/complements', auth.requireAuth, async(req,res)=>{
+  try {res.status(201).json(await db.addSuiviComplement(suiviId(req),req.auth,req.body));}
+  catch(error) {complementError(res,error);}
+});
 app.post('/api/suivis', auth.requireAuth, auth.requireAdmin, (_req, res) => {
   res.status(410).json({ error: 'Anciens suivis en lecture seule; utilisez les tableaux par client.' });
 });

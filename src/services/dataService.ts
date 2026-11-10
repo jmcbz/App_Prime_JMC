@@ -34,6 +34,9 @@ export interface Suivi {
   statut: StatutSuivi;
   echeance: string | null;
   note?: string | null;
+  initialStatut?: StatutSuivi;
+  initialEcheance?: string | null;
+  dernierComplementId?: number | null;
 }
 
 async function parseJson(r: Response) {
