@@ -48,6 +48,14 @@ export default function WorkstationProcedures() {
 function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin: boolean }) {
   const auth = useAuth();
   const exportIdentity = useRef<AbortController | null>(null);
+  // A focus-triggered /me refresh cancels exports, not an already confirmed
+  // deletion for this mounted account. Account changes/unmount still cancel it.
+  const historyIdentity = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    historyIdentity.current = controller;
+    return () => { controller.abort(); if (historyIdentity.current === controller) historyIdentity.current = null; };
+  }, [userId]);
   const activeExport = useRef<AbortSignal | null>(null);
   const exportLocked = useRef(false);
   useEffect(() => {
@@ -256,8 +264,8 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     void run(async () => { const item = await getDossier(id); if (item.id !== id) throw Error('Dossier reçu différent'); if (token !== historyRequest.current || deletedHistory.current.has(id)) return; setDraft(copy(item)); });
   };
   const removeHistory = (item: WorkstationDossier) => {
-    const signal = exportIdentity.current?.signal;
-    if (!isAdmin || locked.current || !signal || signal.aborted || !auth.verified || auth.loading) return;
+    const signal = historyIdentity.current?.signal;
+    if (!isAdmin || locked.current || !signal || signal.aborted || !auth.verified || auth.loading || auth.user?.id !== userId) return;
     if (!window.confirm(`Supprimer l’historique de ${item.clientName} — poste ${item.computer || 'non renseigné'} — dossier #${item.id} ? Cette action est irréversible. Un reçu technique sans contenu sera conservé pour empêcher sa recréation par rejeu.`)) return;
     void run(async () => {
       await deleteDossier(item.id, item.version);
