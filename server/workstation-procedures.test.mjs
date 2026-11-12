@@ -1,3 +1,4 @@
+import {historyDeletionContract} from './workstation-history-contract.mjs';
 import crypto from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,7 +27,7 @@ const socket=net.createServer();await new Promise(r=>socket.listen(0,'127.0.0.1'
 const child=spawn(process.execPath,['server/index.js'],{cwd:process.cwd(),env:{...process.env,PORT:String(port),SEED_ADMIN_EMAIL:'admin@test.invalid'},stdio:['ignore','pipe','pipe']});
 let logs='';child.stderr.on('data',d=>logs+=d);child.stdout.on('data',d=>logs+=d);
 const base=`http://127.0.0.1:${port}`;
-async function request(method,route,who,body,origin){const response=await fetch(base+route,{method,headers:{...(who?{Cookie:`app_prime_session=${tokens[who]}`}:{}) ,...(body?{'Content-Type':'application/json'}:{}),...(origin?{Origin:origin}:{})},body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.json()};}
+async function request(method,route,who,body,origin){const response=await fetch(base+route,{method,headers:{...(who?{Cookie:`app_prime_session=${tokens[who]}`}:{}) ,...(body?{'Content-Type':'application/json'}:{}),...(origin?{Origin:origin}:{})},body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.text().then(text=>{try{return JSON.parse(text);}catch{return {error:text.slice(0,80)};}})};}
 const section=[{title:'Préparation',steps:[{id:'audit',title:'Audit',note:'Noter le modèle'}]}];
 try {
   for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok)break;}catch{}await new Promise(r=>setTimeout(r,50));}
@@ -171,5 +172,13 @@ try {
     assert.match(boot.stderr,/Schéma étranger à App Prime/);
     assert.deepEqual(driver.sqlite.prepare('SELECT id,sections,version FROM workstation_dossiers ORDER BY id').all(),before);
     driver.sqlite.exec('DROP TABLE foreign_marker');
+  });
+ await test('admin deletion is CAS protected, hidden everywhere and replay safe',async()=>{
+   const {id}=await historyDeletionContract(request,own.id,section);
+   const before=driver.sqlite.prepare('SELECT * FROM workstation_dossiers WHERE id=?').get(id);
+   assert.ok(before.deleted_at);assert.equal(before.request_actor,null);assert.equal(before.request_hash,null);assert.equal(before.employee,'');assert.equal(before.computer,'');assert.equal(before.ticket,'');assert.equal(before.date,'');assert.equal(before.sections,'[]');
+   const {migrateSqlite}=await import('./database/workstation-procedures.js');migrateSqlite(driver.sqlite);migrateSqlite(driver.sqlite);
+   assert.deepEqual(driver.sqlite.prepare('SELECT * FROM workstation_dossiers WHERE id=?').get(id),before);
+   assert.equal((await request('GET','/api/workstation-procedures/dossiers/'+id,'admin')).status,404);
   });
 } finally {child.kill();driver.sqlite.close();fs.rmSync(dir,{recursive:true,force:true});}

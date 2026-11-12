@@ -42,17 +42,41 @@ const SCRIPT_TEMPLATE = String.raw`<#
     Rapport sur le Bureau : AuditPoste_<NOMPC>_<date>.html ; chemin complet affiché en console.
     Si le chemin du Bureau est vide : repli dans le dossier du script, existant et accessible en écriture.
     Pour choisir un autre dossier existant : -ReportDir "<dossier de rapport>" (aucun dossier créé).
-    -Pause est optionnel : attend Entrée avant la sortie, y compris en cas d'erreur de rapport.
-    Sans -Pause : aucune attente de saisie (automatisation).
-    Codes : 0 = conforme ; 1 = audit non validé, rapport produit ; 2 = erreur technique de rapport.
+    La fenêtre attend Entrée par défaut avant la sortie, même en cas d'erreur d'exécution.
+    -Pause reste accepté (compatibilité) ; -NoPause désactive toute saisie pour l'automatisation.
+    Si les deux options sont données, -NoPause a priorité.
+    Pour conserver aussi les erreurs de démarrage ou de syntaxe : utiliser le lanceur CMD voisin.
+    Ces erreurs surviennent avant l'exécution du PS1 et ne peuvent pas être interceptées ici.
+    Codes : 0 = conforme ; 1 = audit non validé, rapport produit ; 2 = erreur technique.
     Le code 1 ne valide pas les étapes manuelles et ne signifie pas forcément un plantage.
 .NOTES
     Compatible Windows PowerShell 5.1 et PowerShell 7. v1 — BZ.
 #>
 param(
     [string]$ReportDir = [Environment]::GetFolderPath('Desktop'),
-    [switch]$Pause
+    [switch]$Pause,
+    [switch]$NoPause
 )
+
+# -Pause reste accepté pour les anciens raccourcis ; -NoPause a priorité.
+function Wait-AuditClose {
+    if (-not $NoPause) {
+        try { [void](Read-Host 'Appuyez sur Entrée pour fermer') }
+        catch { Write-Warning 'Pause indisponible dans cette session' -WarningAction Continue }
+    }
+}
+
+# Intercepte les erreurs d'exécution hors des contrôles locaux, dès l'initialisation.
+# Ne pas afficher PositionMessage / les variables : ils contiennent le code et les données client.
+trap {
+    Write-Host ('Erreur inattendue : {0}' -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host ('Emplacement : {0} ; ligne {1}, colonne {2}' -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber, $_.InvocationInfo.OffsetInLine) -ForegroundColor Red
+    if ($_.ScriptStackTrace) { Write-Host ('Pile PowerShell : {0}' -f $_.ScriptStackTrace) -ForegroundColor Red }
+    Write-Host 'Audit interrompu (code 2) : conserver ce message pour le diagnostic.' -ForegroundColor Yellow
+    Wait-AuditClose
+    exit 2
+}
+$ErrorActionPreference = 'Stop'
 
 # Configuration client : valeurs de données littérales, jamais évaluées comme code.
 $Config = @{
@@ -64,7 +88,6 @@ $Config = @{
     Apps = @(__APPS__)
 }
 
-$ErrorActionPreference = 'Stop'
 $script:Resultats = New-Object System.Collections.ArrayList
 
 function Add-Check {
@@ -357,14 +380,14 @@ try {
     $html | Out-File -LiteralPath $fichier -Encoding utf8 -ErrorAction Stop
 } catch {
     Write-Error ('Écriture du rapport impossible : {0}' -f $_.Exception.Message) -ErrorAction Continue
-    if ($Pause) { try { [void](Read-Host 'Appuyez sur Entrée pour fermer') } catch { Write-Warning 'Pause indisponible dans cette session' } }
+    Wait-AuditClose
     exit 2
 }
 Write-Host ""
 Write-Host "Rapport : $fichier" -ForegroundColor Cyan
 if (-not $complete) { Write-Host 'Audit non validé : consulter les échecs et validations restantes dans le rapport (code 1).' -ForegroundColor Yellow }
 try { Start-Process -FilePath $fichier } catch {}
-if ($Pause) { try { [void](Read-Host 'Appuyez sur Entrée pour fermer') } catch { Write-Warning 'Pause indisponible dans cette session' } }
+Wait-AuditClose
 exit $(if ($complete) { 0 } else { 1 })
 `;
 
@@ -463,6 +486,41 @@ function procedureScript(options: WorkstationAuditOptions, literals: Record<stri
   report = report.replace('Audit de montage de poste — BZ v1 · généré automatiquement', 'Audit de montage de poste · $(HtmlEnc $ProcedureName) · généré automatiquement');
   report = report.replace('<h2>Points à valider manuellement</h2><ul>$manuelLis</ul>', '');
   return header.replace('v1 — BZ.', 'procédure sélectionnée.') + `$ProcedureName = ${psLiteral(options.procedure!.name)}\n$ProcedureSource = ${psLiteral(options.procedure!.source || '')}\n\n` + checks + report;
+}
+
+/** Lanceur natif : pause externe même si PowerShell ne démarre pas ou ne peut parser le PS1.
+ * Le nom est ASCII contrôlé ; le dossier %~dp0 peut contenir espaces, accents et apostrophes.
+ * Aucun argument n'est transféré : les données client restent exclusivement dans le PS1.
+ */
+export function generateWorkstationAuditLauncher(scriptFileName = 'audit-poste.ps1'): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._ -]*\.ps1$/i.test(scriptFileName) || scriptFileName.length > 180) {
+    throw new Error('Nom du fichier PS1 invalide pour le lanceur CMD');
+  }
+  return [
+    '@echo off',
+    'setlocal EnableExtensions DisableDelayedExpansion',
+    'set "ERRORLEVEL="',
+    `set "auditScript=%~dp0${scriptFileName}"`,
+    'set "auditPowerShell=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
+    'set "auditExit=2"',
+    'if not exist "%auditScript%" goto missingScript',
+    'if not exist "%auditPowerShell%" goto missingPowerShell',
+    '"%auditPowerShell%" -NoProfile -ExecutionPolicy Bypass -File "%auditScript%" -NoPause',
+    'set "auditExit=%errorlevel%"',
+    'echo.',
+    'echo Code de sortie : %auditExit% ^(0=conforme, 1=audit non valide, 2=erreur technique^).',
+    'goto finish',
+    ':missingScript',
+    'echo ERREUR : fichier PS1 introuvable. Garder le CMD et le PS1 ensemble, sans les renommer.',
+    'goto finish',
+    ':missingPowerShell',
+    'echo ERREUR : Windows PowerShell introuvable ou indisponible.',
+    ':finish',
+    'echo Conserver le message ci-dessus pour le diagnostic.',
+    'set /p "auditClose=Appuyez sur Entree pour fermer..." <CON',
+    'endlocal & exit /b %auditExit%',
+    '',
+  ].join('\r\n');
 }
 
 export function generateWorkstationAuditScript(options: WorkstationAuditOptions = DEFAULT_WORKSTATION_AUDIT_OPTIONS): string {

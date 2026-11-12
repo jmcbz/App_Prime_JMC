@@ -409,3 +409,82 @@ test('current denied pending receipt conceals clients while retaining the origin
  const seed={kind:'template',payload:{requestKey:'9ecb3330-166b-4c93-9cd8-fce998336399',clientId:2,name:'Original',sections:template.sections}};
  for(const status of [401,403]){const f=fixture({pendingSeed:seed,override:({url})=>url.includes('/templates/by-request/')?Response.json({error:'Denied'},{status}):undefined});try{await f.render();assert.doesNotMatch(f.dom.window.document.body.textContent,/Acme TI|Standard Windows/);assert.deepEqual(JSON.parse(f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1')),seed);assert.ok(f.requests.every(r=>r.method==='GET'));}finally{await f.cleanup();}}
 });
+
+
+test('older saved client procedure becomes selectable without loading a hidden global page',async()=>{
+ const newer={...template,id:99,clientId:null,name:'New global'};
+ const f=fixture({override:({url})=>url==='/api/workstation-procedures/templates'?Response.json({templates:[newer],hasMore:true,nextBefore:99}):url.endsWith('/templates?before=99')?Response.json({templates:[template],hasMore:false,nextBefore:null}):undefined});
+ try{await f.render();await f.input('Client','2');assert.ok([...f.dom.window.document.querySelector('[aria-label="Modèle"]').options].some(o=>o.value==='3'),'saved client procedure hidden behind global pagination');}finally{await f.cleanup();}
+});
+
+
+test('admin deletes one open historical dossier after explicit confirmation without changing the selected client procedure',async()=>{
+ let deleted=false,confirmation='';
+ const f=fixture({dossiers:[dossier],override:({url,method})=>{
+  if(url.endsWith('/dossiers/11')&&method==='DELETE'){deleted=true;return Response.json({deleted:{id:11,version:2}});}
+  if(url.endsWith('/dossiers/11')&&method==='GET'&&deleted)return Response.json({error:'Absent'},{status:404});
+ }});
+ try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Ouvrir Alice');
+ f.dom.window.confirm=text=>{confirmation=text;return false;};await f.click('Supprimer l’historique');assert.equal(deleted,false);
+ f.dom.window.confirm=text=>{confirmation=text;return true;};await f.click('Supprimer l’historique');
+ assert.match(confirmation,/Acme TI/);assert.match(confirmation,/PC-1/);assert.match(confirmation,/11/);assert.match(confirmation,/irréversible/i);
+ assert.ok(deleted);assert.ok(!f.dom.window.document.querySelector('[aria-label="Employé"]'));assert.doesNotMatch(f.dom.window.document.body.textContent,/Ouvrir Alice/);
+ assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'3');assert.equal(f.requests.filter(r=>r.method==='DELETE').length,1);
+ assert.deepEqual(f.requests.find(r=>r.method==='DELETE').body,{expectedVersion:1});
+ }finally{await f.cleanup();}
+});
+
+test('non-admin has no history deletion control',async()=>{
+ globalThis.__workstationRole='prime';const f=fixture({dossiers:[dossier]});
+ try{await f.render();await f.click('Ouvrir Alice');assert.ok(![...f.dom.window.document.querySelectorAll('button')].some(b=>b.textContent.includes('Supprimer l’historique')));}finally{globalThis.__workstationRole='admin';await f.cleanup();}
+});
+
+
+test('delete failures and mismatched or unverified acknowledgements never clear history',async()=>{
+ for(const mode of [400,401,403,404,409,500,'wrong-id','wrong-version','still-readable']){
+  const f=fixture({dossiers:[dossier],override:({url,method})=>url.endsWith('/dossiers/11')&&method==='DELETE'?(typeof mode==='number'?Response.json({error:'Refus'},{status:mode}):Response.json({deleted:{id:mode==='wrong-id'?99:11,version:mode==='wrong-version'?3:2}})):undefined});
+  try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Ouvrir Alice');f.dom.window.confirm=()=>true;await f.click('Supprimer l’historique');
+   assert.doesNotMatch(f.dom.window.document.body.textContent,/Historique supprimé/);
+   if(mode!==401&&mode!==403){assert.ok(f.dom.window.document.querySelector('[aria-label="Employé"]'));assert.match(f.dom.window.document.body.textContent,/Ouvrir Alice/);assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'3');}
+   else assert.doesNotMatch(f.dom.window.document.body.textContent,/Alice|Acme TI/);
+  }finally{await f.cleanup();}
+ }
+});
+
+test('double delete clicks send one request; delayed initial list cannot resurrect deleted history',async()=>{
+ let releaseList,releaseDelete,deleted=false;
+ const listGate=new Promise(r=>releaseList=r),deleteGate=new Promise(r=>releaseDelete=r);
+ const f=fixture({override:({url,method})=>{
+  if(url.endsWith('/dossiers')&&method==='GET')return listGate.then(()=>Response.json({dossiers:[dossier],hasMore:false,nextBefore:null}));
+  if(url.endsWith('/dossiers/11')&&method==='DELETE')return deleteGate.then(()=>{deleted=true;return Response.json({deleted:{id:11,version:2}});});
+  if(url.endsWith('/dossiers/11')&&method==='GET'&&deleted)return Response.json({error:'Absent'},{status:404});
+ },pendingSeed:{kind:'dossier',payload:{requestKey:'9ecb3330-166b-4c93-9cd8-fce998336399',clientId:2,templateId:3,employee:'Alice',computer:'PC-1',ticket:'T-1',date:'2026-11-09'}}});
+ try{await f.render();f.dom.window.confirm=()=>true;const button=[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent.startsWith('Supprimer l’historique'));
+ await act(()=>{button.click();button.click();});assert.equal(f.requests.filter(r=>r.method==='DELETE').length,1);
+ await act(async()=>releaseDelete());assert.doesNotMatch(f.dom.window.document.body.textContent,/Ouvrir Alice/);
+ await act(async()=>releaseList());assert.doesNotMatch(f.dom.window.document.body.textContent,/Ouvrir Alice/);assert.ok(!f.dom.window.document.querySelector('[aria-label="Employé"]'));
+ }finally{releaseList();releaseDelete();await f.cleanup();}
+});
+
+test('pending history opening and pagination serialize deletion rather than letting late requests restore it',async()=>{
+ for(const kind of ['open','page']){
+  let release;const gate=new Promise(r=>release=r);
+  const f=fixture({dossiers:[dossier],override:({url,method})=>{
+   if(url.endsWith('/dossiers')&&method==='GET'&&kind==='page')return Response.json({dossiers:[dossier],hasMore:true,nextBefore:11});
+   if(kind==='open'&&url.endsWith('/dossiers/11')&&method==='GET')return gate.then(()=>Response.json({dossier}));
+   if(kind==='page'&&url.endsWith('/dossiers?before=11'))return gate.then(()=>Response.json({dossiers:[],hasMore:false,nextBefore:null}));
+  }});
+  try{await f.render();f.dom.window.confirm=()=>true;await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent.startsWith(kind==='open'?'Ouvrir Alice':'Charger plus de dossiers')).click());await f.click('Supprimer l’historique');assert.equal(f.requests.filter(r=>r.method==='DELETE').length,0);await act(async()=>release());assert.match(f.dom.window.document.body.textContent,/Ouvrir Alice/);}finally{release();await f.cleanup();}
+ }
+});
+
+
+test('late legacy receipt clears its recovery marker but never restores a deleted dossier',async()=>{
+ let release,deleted=false;const gate=new Promise(r=>release=r);
+ const f=fixture({dossiers:[dossier],pendingSeed:{kind:'dossier',payload:{requestKey:'9ecb3330-166b-4c93-9cd8-fce998336399',clientId:2,templateId:3,employee:'Alice',computer:'PC-1',ticket:'T-1',date:'2026-11-09'}},override:({url,method})=>{
+  if(url.includes('/dossiers/by-request/'))return gate.then(()=>Response.json({dossier}));
+  if(url.endsWith('/dossiers/11')&&method==='DELETE'){deleted=true;return Response.json({deleted:{id:11,version:2}});}
+  if(url.endsWith('/dossiers/11')&&method==='GET'&&deleted)return Response.json({error:'Absent'},{status:404});
+ }});
+ try{await f.render();f.dom.window.confirm=()=>true;await f.click('Supprimer l’historique');await act(async()=>release());assert.doesNotMatch(f.dom.window.document.body.textContent,/Ouvrir Alice|Dossier créé|Création en attente/);assert.equal(f.dom.window.sessionStorage.length,0);assert.ok(!f.dom.window.document.querySelector('[aria-label="Employé"]'));}finally{release();await f.cleanup();}
+});

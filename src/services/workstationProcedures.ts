@@ -54,6 +54,14 @@ export const updateTemplate = async (id: number, body: Pick<WorkstationTemplate,
 export const listDossiers = async (before?: number) => page<WorkstationDossier>(await request<Record<string, unknown>>(`/dossiers${before ? `?before=${before}` : ''}`), 'dossiers');
 export const getDossierByRequest = async (key: string) => unwrap(await request<{dossier:WorkstationDossier}>(`/dossiers/by-request/${encodeURIComponent(key)}`), 'dossier');
 export const getDossier = async (id: number) => unwrap(await request<WorkstationDossier | {dossier:WorkstationDossier}>(`/dossiers/${id}`), 'dossier');
+export async function deleteDossier(id: number, expectedVersion: number): Promise<void> {
+  const result = await request<{deleted:{id:number;version:number}}>(`/dossiers/${id}`, 'DELETE', {expectedVersion});
+  if (result?.deleted?.id !== id || result.deleted.version !== expectedVersion + 1) throw new Error('Suppression non confirmée : réponse différente');
+  // Read the exact deleted target, not an eventually paginated list.
+  try { await getDossier(id); }
+  catch (e) { if (e instanceof ProcedureApiError && e.status === 404) return; throw e; }
+  throw new Error('Suppression non confirmée : dossier encore accessible');
+}
 export async function getAuditDossierSource(id: number): Promise<WorkstationDossier> {
   if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Identifiant du dossier invalide');
   const data = await request<unknown>(`/audit-source/dossier/${id}`);

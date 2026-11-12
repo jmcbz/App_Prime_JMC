@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+export async function historyDeletionContract(request,clientId,sections){
+ const base='/api/workstation-procedures';
+ const model=(await request('POST',base+'/templates','a',{requestKey:randomUUID(),clientId,name:'Delete fixture',sections})).body.template;
+ const payload={requestKey:randomUUID(),clientId,templateId:model.id,employee:'Deletion fixture',computer:'PC-DELETE',ticket:'BZ-DELETE',date:'2026-11-12'};
+ const created=await request('POST',base+'/dossiers','a',payload);assert.equal(created.status,201);let d=created.body.dossier;
+ const url=base+'/dossiers/'+d.id;
+ assert.equal((await request('DELETE',url,null,{expectedVersion:d.version})).status,401);
+ assert.equal((await request('DELETE',url,'a',{expectedVersion:d.version})).status,403);
+ assert.equal((await request('GET',url,'admin')).status,200);
+ assert.equal((await request('DELETE',url,'admin',{expectedVersion:d.version+1})).status,409);
+ assert.equal((await request('DELETE',url,'admin',{})).status,400);
+ d=(await request('POST',url+'/archive','a',{expectedVersion:d.version})).body.dossier;
+ const results=await Promise.all([request('DELETE',url,'admin',{expectedVersion:d.version}),request('DELETE',url,'admin',{expectedVersion:d.version})]);
+ assert.deepEqual(results.map(x=>x.status).sort(),[200,404]);
+ const receipt=results.find(x=>x.status===200).body;
+ assert.deepEqual(receipt,{deleted:{id:d.id,version:d.version+1}});
+ for(const route of [url,base+'/audit-source/dossier/'+d.id,base+'/dossiers/by-request/'+payload.requestKey])assert.equal((await request('GET',route,'a')).status,404,route);
+ assert.ok(!(await request('GET',base+'/dossiers','admin')).body.dossiers.some(x=>x.id===d.id));
+ assert.equal((await request('POST',base+'/dossiers','a',payload)).status,404,'replay must not resurrect deleted history');
+ assert.equal((await request('PUT',url,'a',{...d,expectedVersion:d.version})).status,404);
+ assert.equal((await request('POST',url+'/archive','a',{expectedVersion:d.version})).status,404);
+ assert.equal((await request('DELETE',url,'admin',{expectedVersion:d.version})).status,404);
+ assert.equal((await request('GET',base+'/audit-source?clientId='+clientId+'&templateId='+model.id,'a')).body.template.id,model.id);
+ const activePayload={...payload,requestKey:randomUUID(),computer:'PC-ACTIVE'};
+ const active=(await request('POST',base+'/dossiers','a',activePayload)).body.dossier;
+ assert.equal((await request('DELETE',base+'/dossiers/'+active.id,'admin',{expectedVersion:active.version})).status,200,'active history may also be deleted');
+ assert.equal((await request('GET',base+'/dossiers/'+active.id,'a')).status,404);
+ return {id:d.id,requestKey:payload.requestKey};
+}

@@ -351,6 +351,7 @@ app.put('/api/workstation-procedures/templates/:id',auth.requireAuth,workstation
 app.get('/api/workstation-procedures/dossiers',auth.requireAuth,workstationRoute(req=>db.listWorkstationDossiers(req.auth,req.query)));
 app.get('/api/workstation-procedures/dossiers/by-request/:requestKey',auth.requireAuth,workstationRoute(req=>db.reconcileWorkstationDossier(req.auth,req.params.requestKey)));
 app.get('/api/workstation-procedures/dossiers/:id',auth.requireAuth,workstationRoute(req=>db.getWorkstationDossier(req.auth,workstationId(req))));
+app.delete('/api/workstation-procedures/dossiers/:id',auth.requireAuth,auth.requireAdmin,workstationRoute(async req=>workstation.deleteDossier(await db.initDb(),req.auth,workstationId(req),req.body?.expectedVersion)));
 app.post('/api/workstation-procedures/dossiers',auth.requireAuth,workstationRoute(req=>db.createWorkstationDossier(req.auth,req.body),201));
 app.put('/api/workstation-procedures/dossiers/:id',auth.requireAuth,workstationRoute(req=>db.updateWorkstationDossier(req.auth,workstationId(req),req.body)));
 app.post('/api/workstation-procedures/dossiers/:id/archive',auth.requireAuth,workstationRoute(req=>db.archiveWorkstationDossier(req.auth,workstationId(req),req.body?.expectedVersion)));

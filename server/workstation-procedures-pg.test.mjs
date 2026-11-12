@@ -1,3 +1,4 @@
+import {historyDeletionContract} from './workstation-history-contract.mjs';
 import crypto from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,7 +30,7 @@ const tokens={admin:await token(admin),a:await token(a.user),b:await token(b.use
 const socket=net.createServer();await new Promise(r=>socket.listen(0,'127.0.0.1',r));const port=socket.address().port;await new Promise(r=>socket.close(r));
 const base=`http://127.0.0.1:${port}`;
 const child=spawn(process.execPath,['server/index.js'],{cwd:process.cwd(),env:{...process.env,PORT:String(port)},stdio:['ignore','pipe','pipe']});let logs='';child.stdout.on('data',d=>logs+=d);child.stderr.on('data',d=>logs+=d);
-async function req(method,route,who,body){const response=await fetch(base+route,{method,headers:{...(who?{Cookie:`app_prime_session=${tokens[who]}`}:{}) ,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.json()};}
+async function req(method,route,who,body){const response=await fetch(base+route,{method,headers:{...(who?{Cookie:`app_prime_session=${tokens[who]}`}:{}) ,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.text().then(text=>{try{return JSON.parse(text);}catch{return {error:text.slice(0,80)};}})};}
 const sections=[{title:'Préparation',steps:[{id:'check',title:'Audit',note:'Note'}]}];
 try{
  let ready=false;for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,50));}assert(ready,logs);
@@ -144,6 +145,14 @@ try{
      await blocker.query('COMMIT');await transfer;assert(transferDone);
      assert.equal((await post).status,404,'old owner cannot write after transfer');
      assert.equal((await pool.query('SELECT count(*)::int AS n FROM workstation_templates WHERE request_key=$1',[key])).rows[0].n,0);
-   }finally{try{await blocker.query('ROLLBACK');}catch{}blocker.release();}
+}finally{try{await blocker.query('ROLLBACK');}catch{}blocker.release();}
  });
+ await test('admin deletion is CAS protected, hidden everywhere and replay safe',async()=>{
+   const {id}=await historyDeletionContract(req,own.id,sections);
+   const before=(await pool.query('SELECT * FROM workstation_dossiers WHERE id=$1',[id])).rows[0];
+   assert.ok(before.deleted_at);assert.equal(before.request_actor,null);assert.equal(before.request_hash,null);assert.equal(before.employee,'');assert.equal(before.computer,'');assert.equal(before.ticket,'');assert.equal(before.date,'');assert.deepEqual(before.sections,[]);
+   const {migratePg}=await import('./database/workstation-procedures.js');await migratePg(pool);await migratePg(pool);
+   assert.deepEqual((await pool.query('SELECT * FROM workstation_dossiers WHERE id=$1',[id])).rows[0],before);
+   assert.equal((await req('GET','/api/workstation-procedures/dossiers/'+id,'admin')).status,404);
+  });
 }finally{child.kill();await pool.end();}

@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { generateWorkstationAuditScript, DEFAULT_WORKSTATION_AUDIT_OPTIONS } from '../services/workstationAuditScript';
 import { generateWorkstationProcedureHtml } from '../services/workstationHtmlExport';
 import {
-  createDossier, createTemplate, getDossier, getDossierByRequest, getTemplateByRequest, getStandardTemplate, listDossiers, listTemplates,
+  createDossier, createTemplate, deleteDossier, getDossier, getDossierByRequest, getTemplateByRequest, getStandardTemplate, listDossiers, listTemplates,
   ProcedureApiError, updateTemplate, listWorkstationClients, getAuditTemplateSource,
   type WorkstationDossier, type WorkstationTemplate, type TemplateSection, type DossierSection,
 } from '../services/workstationProcedures';
@@ -89,6 +89,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
   const [script, setScript] = useState({ prefix: DEFAULT_WORKSTATION_AUDIT_OPTIONS.computerPrefix, admin: DEFAULT_WORKSTATION_AUDIT_OPTIONS.adminLocal, keyboard: DEFAULT_WORKSTATION_AUDIT_OPTIONS.keyboards.join(', '), printer: DEFAULT_WORKSTATION_AUDIT_OPTIONS.printerName, apps: DEFAULT_WORKSTATION_AUDIT_OPTIONS.apps.join('\n') });
   const requestId = useRef(0);
   const historyRequest = useRef(0);
+  const deletedHistory = useRef(new Set<number>());
   const locked = useRef(false);
   // Reconciliation owns the editor only until a person selects or edits another one.
   const editorRevision = useRef(0);
@@ -109,9 +110,23 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     void listWorkstationClients().then(c=>{if(active)setClients(c);}).catch(failed);
     void listTemplates().then(t=>{if(active){setTemplates(items=>mergeById(items,t.items));setTemplateBefore(t.nextBefore);}}).catch(failed);
     void getStandardTemplate().then(standard=>{if(active)setTemplates(items=>mergeById(items,[standard]));}).catch(failed);
-    void listDossiers().then(d=>{if(active){setDossiers(items=>mergeById(d.items,items));setDossierBefore(d.nextBefore);}}).catch(failed);
+    void listDossiers().then(d=>{if(active){setDossiers(items=>mergeById(d.items,items).filter(d=>!deletedHistory.current.has(d.id)));setDossierBefore(d.nextBefore);}}).catch(failed);
     return () => { active = false; requestId.current++; };
   }, []);
+  useEffect(() => {
+    // The global first page is not the selected client's complete catalogue.
+    // Continue cursor traversal when choosing a client, without requiring a
+    // load-more action in the unrelated reusable-template card.
+    if (!creation.clientId || templateBefore === null) return;
+    let active = true;
+    void listTemplates(templateBefore).then(page => {
+      if (!active) return;
+      if (page.hasMore && page.nextBefore !== null && page.nextBefore >= templateBefore) throw Error('Curseur invalide');
+      setTemplates(items => mergeById(items, page.items));
+      setTemplateBefore(page.nextBefore);
+    }).catch(e => { if (active) { if (e instanceof ProcedureApiError && [401,403].includes(e.status)) denyAccess(); setError(message(e)); } });
+    return () => { active = false; };
+  }, [creation.clientId, templateBefore]);
   useEffect(() => {
     // React Router's links are delegated; intercept before it handles navigation.
     const onLink = (event: MouseEvent) => {
@@ -169,7 +184,8 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     const canSelect=editorRevision.current===editorAtStart&&(ownsDraft||!current.dirty&&!current.modelDirty);
     if(intent.kind==='dossier'){
       const saved=item as WorkstationDossier;
-      setDossiers(items=>mergeById(items,[saved]));
+      if (deletedHistory.current.has(saved.id)) { setPending(null); return; }
+      setDossiers(items=>mergeById(items,[saved]).filter(d=>!deletedHistory.current.has(d.id)));
       // Legacy receipt reconciliation may add history, never select a client procedure.
       if(canSelect)setDraft(copy(saved));
       setNotice('Dossier créé.');
@@ -230,14 +246,28 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     void run(async()=>{const result=kind==='template'?await listTemplates(before):await listDossiers(before);
       if(result.hasMore&&result.nextBefore!==null&&result.nextBefore>=before)throw Error('Curseur invalide');
       if(kind==='template'){setTemplates(items=>mergeById(items,result.items as WorkstationTemplate[]));setTemplateBefore(result.nextBefore);}
-      else {setDossiers(items=>mergeById(items,result.items as WorkstationDossier[]));setDossierBefore(result.nextBefore);}
+      else {setDossiers(items=>mergeById(items,result.items as WorkstationDossier[]).filter(d=>!deletedHistory.current.has(d.id)));setDossierBefore(result.nextBefore);}
     });
   };
   const openDossier = (id: number) => {
     if (locked.current) return;
     const token = ++historyRequest.current;
     setError('');
-    void run(async () => { const item = await getDossier(id); if (token !== historyRequest.current) return; setDraft(copy(item)); });
+    void run(async () => { const item = await getDossier(id); if (item.id !== id) throw Error('Dossier reçu différent'); if (token !== historyRequest.current || deletedHistory.current.has(id)) return; setDraft(copy(item)); });
+  };
+  const removeHistory = (item: WorkstationDossier) => {
+    const signal = exportIdentity.current?.signal;
+    if (!isAdmin || locked.current || !signal || signal.aborted || !auth.verified || auth.loading) return;
+    if (!window.confirm(`Supprimer l’historique de ${item.clientName} — poste ${item.computer || 'non renseigné'} — dossier #${item.id} ? Cette action est irréversible. Un reçu technique sans contenu sera conservé pour empêcher sa recréation par rejeu.`)) return;
+    void run(async () => {
+      await deleteDossier(item.id, item.version);
+      if (signal.aborted) return;
+      historyRequest.current++;
+      deletedHistory.current.add(item.id);
+      setDossiers(items => items.filter(d => d.id !== item.id));
+      setDraft(current => current?.id === item.id ? null : current);
+      setNotice('Historique supprimé.');
+    });
   };
   const mutateModel = (change: (item: WorkstationTemplate) => void) => {
     if (!model) return;
@@ -356,6 +386,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
           <label className="text-sm text-slate-300">Client<select aria-label="Client" className={inputClass} value={creation.clientId} onChange={e => chooseClient(e.target.value)}><option value="">Choisir</option>{clients.map(c => <option key={c.id} value={c.id} disabled={c.clientType !== 'ti'}>{c.nom}{c.clientType === 'ti' ? '' : ' — À classer TI dans Clients'}</option>)}</select></label>
           <label className="text-sm text-slate-300">Procédure enregistrée<select aria-label="Modèle" className={inputClass} value={creation.templateId} onChange={e => chooseProcedure(e.target.value)}><option value="">Choisir une procédure</option>{clientTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
         </div><p className="mt-3 text-sm text-slate-300">Choisissez une procédure enregistrée ou créez une variante pour ce client. Aucun employé, poste, billet ou date requis.</p>
+        {creation.clientId && !clientTemplates.length && <p role="status" className="mt-2 text-sm text-amber-300">{templateBefore ? 'Recherche des procédures enregistrées dans les pages suivantes…' : 'Aucune procédure liée à ce client. Une ancienne procédure globale reste dans les gabarits : utilisez « Dupliquer pour un client » puis sauvegardez sa copie pour ce client.'}</p>}
         <button className={`${buttonClass} mt-3`} disabled={busy || !!pending || pendingInvalid || !clients.some(c=>String(c.id)===creation.clientId && c.clientType==='ti')} onClick={()=>{if(!confirmLeave())return;clearSelectionFeedback();requestId.current++;editorRevision.current++;setModelRequestKey(null);setModel({id:0,clientId:Number(creation.clientId),name:'',version:0,sections:[]});setModelDirty(true);setDuplicating(false);}}>Nouvelle procédure client</button>
         {clients.filter(c=>c.clientType==='ti').map(c=><section key={c.id} aria-label={`Procédures — ${c.nom}`} className="mt-4"><h3 className="font-semibold text-white">{c.nom}</h3>{templates.filter(t=>t.clientId===c.id).map(t=><button key={t.id} className={`${buttonClass} mt-2 w-full text-left`} onClick={()=>{if(!confirmLeave())return;selectSaved(t);editorRevision.current++;setModelRequestKey(null);setModel(copy(t));setModelDirty(false);setDuplicating(false);}}>{t.name}</button>)}</section>)}
       </fieldset></Card>
@@ -364,7 +395,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
         <div className="space-y-2">{templates.filter(t=>t.clientId===null).map(t=><div key={t.id} className="flex flex-wrap gap-2">{isAdmin&&<button className={buttonClass} disabled={busy} onClick={()=>{if(!confirmLeave())return;clearSelectionFeedback();requestId.current++;editorRevision.current++;setModelRequestKey(null);setModel(copy(t));setModelDirty(false);setDuplicating(false);}}>{t.name} · Global</button>}<button className={buttonClass} disabled={busy} onClick={()=>{if(!confirmLeave())return;clearSelectionFeedback();requestId.current++;editorRevision.current++;setModelRequestKey(null);setModel({...copy(t),id:0,clientId:null,version:0});setDuplicating(true);setModelDirty(true);}}>Dupliquer pour un client · {t.name}</button></div>)}</div>{templateBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('template')}>Charger plus de modèles</button>}
       </Card>
     </div>
-    <Card className="my-5 print:hidden"><h2 className="mb-3 text-lg font-semibold text-white">Historiques des dossiers — consultation seulement</h2><p className="text-sm text-slate-300">Ouvrir un historique ne change pas la procédure client sélectionnée ni ses exports.</p>{Array.from(new Set(dossiers.map(d=>d.clientId))).map(clientId=><section key={clientId} aria-label={`Historiques — ${dossiers.find(d=>d.clientId===clientId)!.clientName}`} className="mt-4"><h3 className="font-semibold text-white">{dossiers.find(d=>d.clientId===clientId)!.clientName}</h3><div className="grid gap-2 sm:grid-cols-2">{dossiers.filter(d=>d.clientId===clientId).map(d=><button key={d.id} disabled={busy} className={`${buttonClass} text-left`} onClick={()=>openDossier(d.id)}>Ouvrir {d.employee || d.computer || 'dossier historique'} · {d.clientName}{d.archivedAt?' · Archivé':''}</button>)}</div></section>)}{dossierBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('dossier')}>Charger plus de dossiers</button>}</Card>
+    <Card className="my-5 print:hidden"><h2 className="mb-3 text-lg font-semibold text-white">Historiques des dossiers — consultation seulement</h2><p className="text-sm text-slate-300">Ouvrir un historique ne change pas la procédure client sélectionnée ni ses exports.</p>{Array.from(new Set(dossiers.map(d=>d.clientId))).map(clientId=><section key={clientId} aria-label={`Historiques — ${dossiers.find(d=>d.clientId===clientId)!.clientName}`} className="mt-4"><h3 className="font-semibold text-white">{dossiers.find(d=>d.clientId===clientId)!.clientName}</h3><div className="grid gap-2 sm:grid-cols-2">{dossiers.filter(d=>d.clientId===clientId).map(d=><div key={d.id}><button disabled={busy} className={`${buttonClass} text-left`} onClick={()=>openDossier(d.id)}>Ouvrir {d.employee || d.computer || 'dossier historique'} · {d.clientName}{d.archivedAt?' · Archivé':''}</button>{isAdmin&&<button className={buttonClass} disabled={busy} onClick={()=>removeHistory(d)}>Supprimer l’historique #{d.id}</button>}</div>)}</div></section>)}{dossierBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('dossier')}>Charger plus de dossiers</button>}</Card>
     {model && <Card className="my-5 print:hidden"><fieldset disabled={busy}><h2 className="mb-4 text-lg font-semibold text-white">Éditeur de procédure / gabarit</h2>
       <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm text-slate-300">Nom du modèle<input aria-label="Nom du modèle" className={inputClass} value={model.name} onChange={e => mutateModel(t => { t.name = e.target.value; })} /></label>
       {!model.id && <label className="text-sm text-slate-300">Portée<select aria-label="Client du modèle" disabled={!!pending && modelRequestKey===pending.payload.requestKey} className={inputClass} value={model.clientId ?? ''} onChange={e => mutateModel(t => { t.clientId = e.target.value ? Number(e.target.value) : null; })}>{duplicating && <option value="">Choisir un client TI</option>}{isAdmin && !duplicating && <option value="">Global</option>}{clients.filter(c => c.clientType === 'ti').map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}</select></label>}</div>
@@ -373,7 +404,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
         <button className={`${buttonClass} mt-2`} onClick={() => mutateModel(t => { t.sections[i].steps.push({ id: crypto.randomUUID(), title: '', note: '' }); })}>Ajouter une étape {i + 1}</button></div>)}
       <div className="mt-4 flex flex-wrap gap-2"><button className={buttonClass} onClick={() => mutateModel(t => { t.sections.push(newSection()); })}>Ajouter une section</button><button className={buttonClass} disabled={busy || (!model.id&&(!!pending||pendingInvalid)) || ((duplicating || !isAdmin) && !model.clientId) || !model.name.trim() || !model.sections.length || model.sections.some(s => !s.title.trim() || !s.steps.length || s.steps.some(step => !step.title.trim()))} onClick={saveModel}>Sauvegarder le modèle</button></div>
     </fieldset></Card>}
-    {draft && <Card className="my-5 print:border-0 print:bg-white print:text-black"><fieldset disabled={busy}><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-bold text-white print:text-black">Dossier d’installation — {draft.clientName}</h2><p className="text-sm text-slate-300 print:text-black">{draft.archivedAt ? 'Archivé · Lecture seule' : 'Historique · Lecture seule'} · {progress?.done} / {progress?.total} étapes applicables terminées</p></div><button className={`${buttonClass} print:hidden`} disabled={dirty} onClick={() => window.print()}>Imprimer</button></div>
+    {draft && <Card className="my-5 print:border-0 print:bg-white print:text-black"><fieldset disabled={busy}><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-bold text-white print:text-black">Dossier d’installation — {draft.clientName}</h2><p className="text-sm text-slate-300 print:text-black">{draft.archivedAt ? 'Archivé · Lecture seule' : 'Historique · Lecture seule'} · {progress?.done} / {progress?.total} étapes applicables terminées</p></div><div className="flex gap-2 print:hidden"><button className={buttonClass} disabled={dirty} onClick={() => window.print()}>Imprimer</button>{isAdmin&&<button className={buttonClass} disabled={busy} onClick={()=>removeHistory(draft)}>Supprimer l’historique ouvert #{draft.id}</button>}</div></div>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">{(['employee', 'computer', 'ticket', 'date'] as const).map(key => <label key={key} className="text-sm text-slate-300 print:text-black">{{employee:'Employé',computer:'Ordinateur',ticket:'Billet',date:'Date'}[key]}<input aria-label={{employee:'Employé',computer:'Ordinateur',ticket:'Billet',date:'Date'}[key]} className={`${inputClass} print:border-black print:bg-white print:text-black`} type={key === 'date' ? 'date' : 'text'} value={draft[key]} disabled readOnly /></label>)}</div>
       {draft.sections.map((section: DossierSection, i) => <section key={i} className="mt-5"><h3 className="mb-2 font-semibold text-white print:text-black">{section.title}</h3>{section.steps.map(step => <div key={step.id} className="workstation-print-area mb-3 rounded-lg border border-white/10 p-3 print:border-black"><div className="font-medium text-white print:text-black">{step.title}</div>{step.note && <p className="text-sm text-slate-400 print:text-black">{step.note}</p>}<div className="mt-2 grid gap-2 sm:grid-cols-[auto_1fr]"><label className="text-xs text-slate-300 print:text-black">État<select aria-label={`État — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.etat} disabled><option value="todo">À faire</option><option value="fait">Fait</option><option value="na">N/A</option></select><span className="workstation-print-answer hidden">{{todo:'À faire',fait:'Fait',na:'N/A'}[step.etat]}</span></label><label className="text-xs text-slate-300 print:text-black">Commentaire<textarea aria-label={`Commentaire — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.commentaire} disabled readOnly /><span className="workstation-print-answer hidden">{step.commentaire}</span></label></div></div>)}</section>)}
 

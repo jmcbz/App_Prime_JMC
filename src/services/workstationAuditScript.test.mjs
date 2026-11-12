@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const outfile = new URL('./.workstation-audit-test.mjs', import.meta.url).pathname;
-let generateWorkstationAuditScript;
+let generateWorkstationAuditScript, generateWorkstationAuditLauncher;
 try {
   await build({ entryPoints: [new URL('./workstationAuditScript.ts', import.meta.url).pathname], outfile, bundle: true, platform: 'node', format: 'esm' });
-  ({ generateWorkstationAuditScript } = await import(outfile));
+  ({ generateWorkstationAuditScript, generateWorkstationAuditLauncher } = await import(outfile));
 } finally { try { unlinkSync(outfile); } catch {} }
 
 const options = {clientName:'BZ',computerPrefix:'PC-',adminLocal:'bzinc',keyboards:['fr-CA'],printerName:'',apps:['Microsoft 365 / Office','Adobe Acrobat','Google Chrome','TeamViewer','Lenovo Vantage']};
@@ -343,7 +343,7 @@ test('duplicate configured app cannot inflate HTML KPI or create an extra report
   const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'audit-count-'));
   try {
     const file = join(dir, 'report.ps1');
-    const source = `$ReportDir='${dir}'\n$env:COMPUTERNAME='PC-TEST'\n$env:USERNAME='test'\n$Config=@{ClientName='BZ';Apps=@('Google Chrome',' google  chrome ','TeamViewer')}\n$script:Resultats=New-Object System.Collections.ArrayList\nfunction Add-Check {param($Categorie,$Nom,$Etat,$Detail) [void]$script:Resultats.Add([pscustomobject]@{Categorie=$Categorie;Nom=$Nom;Etat=$Etat;Detail=$Detail})}\n${appMocks('Google Chrome')}\n${apps}\n${report}`;
+    const source = `function Wait-AuditClose {}\n$ReportDir='${dir}'\n$env:COMPUTERNAME='PC-TEST'\n$env:USERNAME='test'\n$Config=@{ClientName='BZ';Apps=@('Google Chrome',' google  chrome ','TeamViewer')}\n$script:Resultats=New-Object System.Collections.ArrayList\nfunction Add-Check {param($Categorie,$Nom,$Etat,$Detail) [void]$script:Resultats.Add([pscustomobject]@{Categorie=$Categorie;Nom=$Nom;Etat=$Etat;Detail=$Detail})}\n${appMocks('Google Chrome')}\n${apps}\n${report}`;
     writeFileSync(file, '\ufeff' + source);
     const result = spawnSync('pwsh', ['-NoProfile','-NonInteractive','-File',file], {encoding:'utf8'});
     assert.equal(result.status, 1, result.stderr); // Manual checklist keeps the audit non-conformant.
@@ -364,7 +364,7 @@ test('script-side report encodes dynamic client, user, computer, check and manua
   const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'audit-html-'));
   try {
     const file = join(dir, 'report.ps1');
-    const source = `$ReportDir='${dir}'\n$env:COMPUTERNAME='PC-<svg onload=alert(1)>'\n$env:USERNAME='<b>intrus</b>'\n$Config=@{ClientName='${payload}'}\n$Resultats=@([pscustomobject]@{Categorie='${payload}';Nom='${payload}';Etat='ECHEC';Detail='${payload}'})\n${report.replace("'Signature courriel conforme (pas de virgule sans titre)'", `'${payload}'`)}`;
+    const source = `function Wait-AuditClose {}\n$ReportDir='${dir}'\n$env:COMPUTERNAME='PC-<svg onload=alert(1)>'\n$env:USERNAME='<b>intrus</b>'\n$Config=@{ClientName='${payload}'}\n$Resultats=@([pscustomobject]@{Categorie='${payload}';Nom='${payload}';Etat='ECHEC';Detail='${payload}'})\n${report.replace("'Signature courriel conforme (pas de virgule sans titre)'", `'${payload}'`)}`;
     writeFileSync(file, '\ufeff' + source);
     const result = spawnSync('pwsh', ['-NoProfile','-NonInteractive','-File',file], {encoding:'utf8'});
     assert.equal(result.status, 1, result.stderr);
@@ -652,7 +652,7 @@ test('malformed or oversized procedure data fails closed rather than generating 
 });
 
 // Full-script runtime: Windows-only APIs are inert fixtures; pipelines/HTML/I/O/exit are real.
-const fullWindowsStubs = String.raw`param([string]$ScriptPath,[string]$ReportDir,[string]$Scenario='healthy',[switch]$UseDefaultReportDir,[switch]$PauseAudit)
+const fullWindowsStubs = String.raw`param([string]$ScriptPath,[string]$ReportDir,[string]$Scenario='healthy',[switch]$UseDefaultReportDir,[switch]$PauseAudit,[switch]$NoPauseAudit)
 $ErrorActionPreference='Stop'
 $env:COMPUTERNAME='PC-FIXTURE'
 $env:USERNAME='Usager é <fixture>'
@@ -707,9 +707,11 @@ function New-Object {
  $session | Add-Member ScriptMethod CreateUpdateSearcher {return $global:FixtureSearcher}
  return $session
 }
-function Read-Host { param($Prompt) Write-Host "FIXTURE_READ_HOST"; return "" }
+function Read-Host { param($Prompt) Write-Host "FIXTURE_READ_HOST"; if ($global:FixtureScenario -eq 'pause-unavailable') {throw 'Fixture console unavailable'}; return "" }
+if ($Scenario -eq 'pause-unavailable') {$WarningPreference='Stop'}
 $invoke=@{}
 if ($PauseAudit) {$invoke.Pause=$true}
+if ($NoPauseAudit) {$invoke.NoPause=$true}
 if (-not $UseDefaultReportDir) {$invoke.ReportDir=$ReportDir}
 try {
  & $ScriptPath @invoke
@@ -743,7 +745,8 @@ function fullRun({dirMode='valid',pause=false,scenario='healthy',opts=fullOption
     if(dirMode==='readonly')reportDir='/opt/pwsh';
     const args=['-NoProfile','-NonInteractive','-File',wrapper,'-ScriptPath',file,'-Scenario',scenario];
     if(dirMode==='default')args.push('-UseDefaultReportDir');else args.push('-ReportDir',reportDir);
-    if(pause)args.push('-PauseAudit');
+    if(pause===true || pause==='both')args.push('-PauseAudit');
+    if(pause===false || pause==='both')args.push('-NoPauseAudit');
     const run=spawnSync('pwsh',args,{encoding:'utf8',timeout:20000});
     const target=dirMode==='default'?dir:reportDir;
     const reports=target && existsSync(target)?readdirSync(target).filter(x=>/^AuditPoste_PC-FIXTURE_.*\.html$/.test(x)):[];
@@ -751,6 +754,31 @@ function fullRun({dirMode='valid',pause=false,scenario='healthy',opts=fullOption
     verify({...run,html,reports,reportDir:target,dir,fatal:existsSync(join(dir,'fatal-error.json'))});
   } finally {rmSync(dir,{recursive:true,force:true});}
 }
+
+test('full script pauses by default before a complete exit', () => {
+  fullRun({pause:'default'}, run => {
+    assert.equal(run.status,0,run.stderr);
+    assert.equal((run.stdout.match(/FIXTURE_READ_HOST/g)||[]).length,1);
+    assert.ok(run.stdout.indexOf('Rapport :') < run.stdout.indexOf('FIXTURE_READ_HOST'));
+  });
+});
+
+for (const stage of ['early','late','after-report']) test(`full script unexpected ${stage} failure shows diagnostics and pauses before technical exit`, () => {
+  const marker = stage==='early' ? '# Configuration client' : stage==='late' ? '# ============================ RAPPORT' : 'try { Start-Process -FilePath $fichier } catch {}';
+  const transform = s => s.replace(marker, `throw 'Fixture unexpected ${stage}' # SOURCE_SECRET_NOT_FOR_DIAGNOSTICS\n${marker}`);
+  fullRun({pause:'default',transform}, run => {
+    assert.equal(run.status,2,run.stderr);
+    assert.equal((run.stdout.match(/FIXTURE_READ_HOST/g)||[]).length,1);
+    const text=run.stdout+run.stderr;
+    assert.match(text,new RegExp(`Erreur inattendue.*Fixture unexpected ${stage}`,'s'));
+    assert.match(text,/audit\.ps1.*(?:ligne|line)/s);
+    assert.match(text,/Pile PowerShell/);
+    assert.doesNotMatch(text,/SOURCE_SECRET_NOT_FOR_DIAGNOSTICS/);
+    assert.equal(run.fatal,false);
+    assert.equal(run.reports.length,stage==='after-report'?1:0);
+    assert.equal(run.stdout.includes('Rapport :'),stage==='after-report');
+  });
+});
 
 test('full script controls explicit blank report path with technical exit 2', () => {
   fullRun({dirMode:'blank'}, run => {
@@ -794,6 +822,54 @@ for (const [label,params,exit] of [
   });
 });
 
+test('CMD launcher keeps an external Enter pause and exact neighbor path without argument injection (static)', () => {
+  const cmd=generateWorkstationAuditLauncher('audit poste-L-Intendant.ps1');
+  assert.match(cmd,/^@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\n/);
+  assert.match(cmd,/set "ERRORLEVEL="\r\n/); // Do not let an inherited variable shadow CMD's exit-code pseudo-variable.
+  assert.match(cmd,/set "auditScript=%~dp0audit poste-L-Intendant\.ps1"/);
+  assert.match(cmd,/if not exist "%auditScript%" goto missingScript/);
+  assert.match(cmd,/if not exist "%auditPowerShell%" goto missingPowerShell/);
+  assert.match(cmd,/"%auditPowerShell%" -NoProfile -ExecutionPolicy Bypass -File "%auditScript%" -NoPause\r\nset "auditExit=%errorlevel%"/);
+  assert.match(cmd,/set \/p "auditClose=.*Entree.*" <CON/);
+  assert.match(cmd,/endlocal & exit \/b %auditExit%\r\n$/);
+  assert.doesNotMatch(cmd,/%\*|\bcall\b|-NoExit|-Command|Set-ExecutionPolicy/i);
+  assert.doesNotMatch(cmd,/(?<!\r)\n|[^\x00-\x7f]/);
+  assert.equal(cmd.split('set /p').length-1,1);
+  for (const name of ['../x.ps1','C:\\x.ps1','bad%PATH%.ps1','bad!VAR!.ps1','bad&calc.ps1','bad\".ps1','bad\r\ncalc.ps1',"d'Intendant.ps1",'é.ps1','x.cmd']) {
+    assert.throws(()=>generateWorkstationAuditLauncher(name),/nom/i,name);
+  }
+});
+
+test('full script NoPause wins over legacy Pause and never reads input', () => {
+  fullRun({pause:'both'}, run=>{
+    assert.equal(run.status,0,run.stderr);assert.doesNotMatch(run.stdout,/FIXTURE_READ_HOST/);
+  });
+});
+for (const [label,params,expected] of [
+  ['complete',{},0],
+  ['incomplete',{scenario:'one-update'},1],
+  ['report error',{dirMode:'blank'},2],
+  ['unexpected early',{transform:s=>s.replace('# Configuration client', "throw 'NoPause early failure'\n# Configuration client")},2],
+  ['unexpected late',{transform:s=>s.replace('# ============================ RAPPORT', "throw 'NoPause late failure'\n# ============================ RAPPORT")},2],
+]) {
+  test(`full script default pause preserves ${label} exit ${expected}`,()=>{
+    fullRun({...params,pause:'default'},run=>{
+      assert.equal(run.status,expected,run.stderr);assert.equal((run.stdout.match(/FIXTURE_READ_HOST/g)||[]).length,1);
+    });
+  });
+  test(`full script explicit NoPause preserves ${label} exit ${expected} without input`,()=>{
+    fullRun({...params,pause:false},run=>{
+      assert.equal(run.status,expected,run.stderr);assert.doesNotMatch(run.stdout,/FIXTURE_READ_HOST/);
+    });
+  });
+  test(`full script unavailable pause preserves ${label} exit ${expected}`,()=>{
+    fullRun({...params,scenario:'pause-unavailable',pause:'default',...(label==='incomplete'?{opts:{...fullOptions,procedure:{name:'Manuel',sections:[{title:'Validation',steps:[{id:'manual',title:'Vérifier manuellement',note:''}]}]}}}:{})},run=>{
+      assert.equal(run.status,expected,run.stderr);assert.equal((run.stdout.match(/FIXTURE_READ_HOST/g)||[]).length,1);
+      assert.match(run.stdout,/Pause indisponible/);assert.equal(run.fatal,false);
+    });
+  });
+}
+
 test('launch help supports dynamic downloaded filenames and documents cwd, reports, Pause and exit contract', () => {
   for(const opts of [options,fullOptions]) {
     const script=generateWorkstationAuditScript(opts);
@@ -801,7 +877,8 @@ test('launch help supports dynamic downloaded filenames and documents cwd, repor
     assert.doesNotMatch(script,/Audit-MontagePoste\.ps1|audit-poste-windows\.ps1/);
     assert.match(script,/dossier courant/);assert.match(script,/dossier du script/);
     assert.match(script,/0 = conforme.*1 = audit non validé.*2 = erreur technique/s);
-    assert.match(script,/Sans -Pause.*aucune attente/s);
+    assert.match(script,/attend Entrée par défaut/);assert.match(script,/-NoPause désactive toute saisie/);
+    assert.match(script,/lanceur CMD voisin/);
   }
 });
 
