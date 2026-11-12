@@ -74,10 +74,9 @@ const parseAuditId=value=>typeof value==='string'&&/^[1-9]\d*$/.test(value)&&Num
 export async function auditSource(driver,actor,input){
  const clientId=parseAuditId(input?.clientId),templateId=parseAuditId(input?.templateId);
  return run(driver,async q=>{
-  const type=driver.kind==='pg'?"c.data->>'clientType'":"json_extract(c.data,'$.clientType')";
   const row=await one(q,`SELECT c.id AS selected_client_id,c.data AS client_data,t.id,t.client_id,t.name,t.version,t.sections
    FROM clients c JOIN workstation_templates t ON (t.client_id IS NULL OR t.client_id=c.id)
-   WHERE c.id=? AND t.id=? AND c.prime_id IS NOT NULL AND ${type}='ti'
+   WHERE c.id=? AND t.id=?
    AND (?='admin' OR EXISTS (SELECT 1 FROM prime_user_links l WHERE l.user_id=? AND l.prime_id=c.prime_id))`,
    [clientId,templateId,actor.role,actor.sub]);
   if(!row)fail(404,'Source introuvable');
@@ -88,10 +87,9 @@ export async function auditSource(driver,actor,input){
 export async function auditDossierSource(driver,actor,rawId){
  const dossierId=parseAuditId(rawId);
  return run(driver,async q=>{
-  const type=driver.kind==='pg'?"c.data->>'clientType'":"json_extract(c.data,'$.clientType')";
   const row=await one(q,`SELECT d.*,c.data AS client_data FROM workstation_dossiers d
    JOIN clients c ON c.id=d.client_id
-   WHERE d.id=? AND d.deleted_at IS NULL AND c.prime_id IS NOT NULL AND ${type}='ti'
+   WHERE d.id=? AND d.deleted_at IS NULL
    AND (?='admin' OR EXISTS (SELECT 1 FROM prime_user_links l WHERE l.user_id=? AND l.prime_id=c.prime_id))`,
    [dossierId,actor.role,actor.sub]);
   if(!row)fail(404,'Source introuvable');
@@ -99,7 +97,9 @@ export async function auditDossierSource(driver,actor,rawId){
   return {dossier:dossier({...row,client_name:data.nom??''})};
  });
 }
-async function scope(q,actor,clientId,lock=false){const row=await one(q,`SELECT c.id,c.data,c.prime_id FROM clients c WHERE c.id=?${lock?' FOR UPDATE':''}`,[clientId]);if(!row)return false;const data=typeof row.data==='string'?JSON.parse(row.data):row.data;if(data.clientType!=='ti')return false;if(actor.role==='admin')return true;const link=await one(q,'SELECT prime_id FROM prime_user_links WHERE user_id=?',[actor.sub]);return !!link&&link.prime_id===row.prime_id;}
+// Match GET /api/clients: admins see all; others require a real SQL portfolio match.
+// SQL equality deliberately never matches NULL assignments (including legacy links).
+async function scope(q,actor,clientId,lock=false){const row=await one(q,`SELECT c.id,c.data,c.prime_id FROM clients c WHERE c.id=?${lock?' FOR UPDATE':''}`,[clientId]);if(!row)return false;if(actor.role==='admin')return true;return !!await one(q,'SELECT prime_id FROM prime_user_links WHERE user_id=? AND prime_id=?',[actor.sub,row.prime_id]);}
 async function visibleTemplate(q,actor,templateId,lock=false){let row=await one(q,'SELECT * FROM workstation_templates WHERE id=?',[templateId]);if(!row)return null;if(row.client_id!==null&&!await scope(q,actor,row.client_id,lock))return null;if(lock){row=await one(q,'SELECT * FROM workstation_templates WHERE id=? FOR UPDATE',[templateId]);if(!row||row.client_id!==null&&!await scope(q,actor,row.client_id))return null;}return row;}
 async function detailRow(q,id,actor,lock=false){let row=await one(q,'SELECT d.*,c.data AS client_data FROM workstation_dossiers d JOIN clients c ON c.id=d.client_id WHERE d.id=? AND d.deleted_at IS NULL',[id]);if(!row||!await scope(q,actor,row.client_id,lock))fail(404,'Dossier introuvable');if(lock){row=await one(q,'SELECT d.*,c.data AS client_data FROM workstation_dossiers d JOIN clients c ON c.id=d.client_id WHERE d.id=? AND d.deleted_at IS NULL FOR UPDATE OF d',[id]);if(!row||!await scope(q,actor,row.client_id))fail(404,'Dossier introuvable');}const data=typeof row.client_data==='string'?JSON.parse(row.client_data):row.client_data;return {...row,client_name:data.nom??''};}
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -107,7 +107,7 @@ function requestKey(v){if(!uuid(v))fail(400,'requestKey UUID requis');return v.t
 const digest=v=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
 function page(input={}){const limit=input.limit===undefined?50:Number(input.limit),before=input.before===undefined?null:Number(input.before);if(!Number.isSafeInteger(limit)||limit<1||limit>50||before!==null&&!id(before))fail(400,'Pagination invalide');return {limit,before};}
 function pageResult(rows,limit,key,convert){const hasMore=rows.length>limit,selected=rows.slice(0,limit);return {[key]:selected.map(convert),hasMore,nextBefore:hasMore?selected.at(-1).id:null};}
-function scopeClause(driver,alias){const type=driver.kind==='pg'?`c.data->>'clientType'`:`json_extract(c.data,'$.clientType')`;return `(${alias}.client_id IS NULL OR EXISTS (SELECT 1 FROM clients c WHERE c.id=${alias}.client_id AND ${type}='ti' AND (?='admin' OR c.prime_id IN (SELECT prime_id FROM prime_user_links WHERE user_id=?))))`;}
+function scopeClause(_driver,alias){return `(${alias}.client_id IS NULL OR EXISTS (SELECT 1 FROM clients c WHERE c.id=${alias}.client_id AND (?='admin' OR EXISTS (SELECT 1 FROM prime_user_links l WHERE l.user_id=? AND l.prime_id=c.prime_id))))`;}
 export async function listTemplates(driver,actor,input){const {limit,before}=page(input);return run(driver,async q=>{const rows=await q(`SELECT t.* FROM workstation_templates t WHERE ${scopeClause(driver,'t')} AND (CAST(? AS INTEGER) IS NULL OR t.id<?) ORDER BY t.id DESC LIMIT ?`,[actor.role,actor.sub,before,before,limit+1]);return pageResult(rows,limit,'templates',template);});}
 export async function getStandardTemplate(driver){return run(driver,async q=>{const row=await one(q,"SELECT * FROM workstation_templates WHERE seed_key='bz-standard-workstation-v1'");if(!row)fail(404,'Modèle introuvable');return {template:template(row)};});}
 async function requestRow(q,table,key,actor,lock=false){const row=await one(q,`SELECT * FROM ${table} WHERE request_key=?`,[key]);if(!row)return null;if(table==='workstation_dossiers'&&row.deleted_at)fail(404,'Dossier introuvable');if(row.client_id!==null&&!await scope(q,actor,row.client_id,lock))fail(404,'Introuvable');return row;}

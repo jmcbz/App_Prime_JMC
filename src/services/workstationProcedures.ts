@@ -91,8 +91,8 @@ export async function listWorkstationClients(): Promise<ClientPrime[]> {
     (c.primeId === null || Number.isSafeInteger(c.primeId) && c.primeId > 0) && (c.clientType === null || c.clientType === 'ti' || c.clientType === 'telecom'))) {
     throw new Error('Réponse des clients invalide');
   }
-  // /api/clients already scopes Prime users. An admin sees every assigned client.
-  // Never infer that an unclassified client is TI: show it but forbid creation.
-  return data.clients.filter((c: ClientPrime) => c.primeId !== null && c.clientType !== 'telecom')
+  // /api/clients is the authoritative directory, including its portfolio rights.
+  // Classification and Prime assignment are metadata, not procedure eligibility.
+  return data.clients
     .sort((a: ClientPrime, b: ClientPrime) => a.nom.localeCompare(b.nom, 'fr-CA'));
 }

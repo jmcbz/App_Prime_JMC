@@ -31,7 +31,7 @@ async function request(method,route,who,body,origin){const response=await fetch(
 const section=[{title:'Préparation',steps:[{id:'audit',title:'Audit',note:'Noter le modèle'}]}];
 try {
   for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok)break;}catch{}await new Promise(r=>setTimeout(r,50));}
-  await test('audit source requires a current TI portfolio and a matching visible template over SQLite HTTP',async()=>{
+  await test('audit source requires a current Clients portfolio and a matching visible template over SQLite HTTP',async()=>{
     const global=(await request('GET','/api/workstation-procedures/templates','a')).body.templates[0];
     const local=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:own.id,name:'Audit local',sections:section})).template;
     const other=(await db.createWorkstationTemplate({role:'admin',sub:admin.id},{requestKey:crypto.randomUUID(),clientId:foreign.id,name:'Foreign model',sections:section})).template;
@@ -44,7 +44,7 @@ try {
     assert.deepEqual((await request('GET',url(own.id,global.id),'a')).body,{client:expected.client,template:global});
     assert.deepEqual((await request('GET',url(foreign.id,other.id),'admin')).body,{client:{id:foreign.id,nom:'Foreign TI'},template:other});
     assert.equal((await request('GET',url(own.id,local.id))).status,401);
-    for(const who of ['a','admin'])for(const c of [telecom.id,unknown.id,unassigned.id])assert.equal((await request('GET',url(c,global.id),who)).status,404);
+    for(const who of ['a','admin'])for(const c of [telecom.id,unknown.id,unassigned.id])assert.equal((await request('GET',url(c,global.id),who)).status,c===unassigned.id&&who!=='admin'?404:200);
     assert.equal((await request('GET',url(foreign.id,other.id),'a')).status,404);
     for(const who of ['a','admin'])assert.equal((await request('GET',url(own.id,other.id),who)).status,404);
     for(const bad of ['0','-1','1x','1.0','9007199254740992',''])assert.equal((await request('GET',url(bad,local.id),'a')).status,400);
@@ -73,14 +73,14 @@ try {
     assert.equal((await request('GET',url,'a')).status,404);
     assert.deepEqual((await request('GET',url,'b')).body,{dossier});
     driver.sqlite.prepare('UPDATE clients SET prime_id=NULL WHERE id=?').run(client.id);
-    assert.equal((await request('GET',url,'admin')).status,404);
+    assert.equal((await request('GET',url,'admin')).status,200);
     assert.equal((await request('GET',url,'b')).status,404);
     assert.deepEqual((await request('GET',`/api/workstation-procedures/dossiers/${dossier.id}`,'admin')).body,{dossier});
     driver.sqlite.prepare('UPDATE clients SET prime_id=? WHERE id=?').run(a.prime.id,client.id);
     for(const type of ['telecom',null]){
       driver.sqlite.prepare('UPDATE clients SET data=? WHERE id=?').run(JSON.stringify({nom:'Snapshot TI',clientType:type}),client.id);
-      assert.equal((await request('GET',url,'admin')).status,404);
-      assert.equal((await request('GET',url,'a')).status,404);
+      assert.equal((await request('GET',url,'admin')).status,200);
+      assert.equal((await request('GET',url,'a')).status,200);
     }
   });
   await test('shared templates and scoped dossier snapshots over authenticated HTTP',async()=>{
@@ -96,7 +96,7 @@ try {
     assert.equal((await request('GET','/api/workstation-procedures/templates','b')).body.templates.some(t=>t.id===adminGlobal.body.template.id),true);
     assert.equal((await request('GET','/api/workstation-procedures/templates')).status,401);
     const denied=await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:foreign.id,name:'Private',sections:section});assert.equal(denied.status,404);
-    assert.equal((await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:telecom.id,name:'No telecom',sections:section})).status,404);
+    assert.equal((await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:telecom.id,name:'No telecom',sections:section})).status,201);
     assert.equal((await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:null,name:'Global',sections:section})).status,403);
     const created=await request('POST','/api/workstation-procedures/templates','a',{requestKey:crypto.randomUUID(),clientId:own.id,name:'Own template',sections:section});assert.equal(created.status,201,JSON.stringify(created));
     const template=created.body.template;assert.equal(template.clientId,own.id);
@@ -154,6 +154,7 @@ try {
     assert.equal((await request('POST','/api/workstation-procedures/dossiers','b',data)).status,404);
     assert.equal((await request('GET',`/api/workstation-procedures/dossiers/by-request/${dkey}`,'b')).status,404);
   });
+  await test('every Clients directory entry supports the same authorized procedure lifecycle (SQLite)',async()=>{const {directoryContract}=await import('./workstation-directory-contract.mjs');await directoryContract({db,auth,request,tokens,token,admin,a,b,sections:section});});
   await test('SQLite repeated boot preserves filled dossiers and seeds standard once',()=>{
     const before=driver.sqlite.prepare('SELECT id,sections,version FROM workstation_dossiers ORDER BY id').all();
     const boot="import {initDb} from './server/database/index.js'; const driver=await initDb(); console.log(JSON.stringify(driver.sqlite.prepare(\"SELECT count(*) AS n FROM workstation_templates WHERE seed_key='bz-standard-workstation-v1'\").get())); driver.sqlite.close();";
