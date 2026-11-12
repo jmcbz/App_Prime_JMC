@@ -67,6 +67,15 @@ test('Prime tools exposes the workstation editor route',async()=>{
   try{globalThis.IS_REACT_ACT_ENVIRONMENT=true;await act(async()=>root.render(React.createElement(MemoryRouter,{future:{v7_startTransition:true,v7_relativeSplatPath:true}},React.createElement(Procedures))));assert.ok(dom.window.document.querySelector('a[href="/procedures/installation-postes"]'));}finally{await act(async()=>root.unmount());Object.assign(globalThis,old);dom.window.close();}
 });
 
+test('HTML download panel explains the local checklist and PDF retention', async()=>{
+  const f=fixture();try{await f.render();const panel=[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la procédure HTML').parentElement;
+    assert.match(panel.textContent,/checklist cochable hors ligne/i);
+    assert.match(panel.textContent,/Imprimer \/ Enregistrer en PDF/);
+    assert.match(panel.textContent,/pas sauvegardées automatiquement/i);
+    assert.match(panel.textContent,/aucune synchronisation/i);
+  }finally{await f.cleanup();}
+});
+
 test('lists shared models and scoped TI clients, excluding telecom',async()=>{const f=fixture();try{await f.render();assert.match(f.dom.window.document.body.textContent,/Standard Windows/);assert.match(f.dom.window.document.body.textContent,/Acme TI/);assert.doesNotMatch(f.dom.window.document.querySelector('select[aria-label="Client"]')?.textContent??'',/Télécom/);}finally{await f.cleanup();}});
 
 test('assigned but unclassified clients appear disabled until classified TI, without telecom or unassigned clients',async()=>{const f=fixture();try{await f.render();const select=f.dom.window.document.querySelector('select[aria-label="Client"]');const options=[...select.options];assert.equal(options.find(o=>o.textContent.includes('Acme TI'))?.disabled,false);const pending=options.find(o=>o.textContent.includes('À classer'));assert.ok(pending,'assigned unclassified client should be visible');assert.equal(pending.disabled,true);assert.match(pending.textContent,/classer TI/i);assert.ok(!options.some(o=>o.textContent.includes('Télécom')||o.textContent.includes('Sans Prime')));}finally{await f.cleanup();}});

@@ -17,13 +17,42 @@ const modelSource = () => ({kind:'template',clientName:'Acme TI',template});
 const dossierSource = () => ({kind:'dossier',dossier});
 const render = source => { const html=generateWorkstationProcedureHtml(source); return {html,document:new JSDOM(html).window.document}; };
 
+test('offline checklist starts blank for a model and preserves saved done/todo/N/A states', () => {
+  const model = render(modelSource()).document;
+  assert.equal(model.querySelectorAll('input[type="checkbox"]').length, 1);
+  assert.equal(model.querySelector('input').checked, false);
+  const saved = render(dossierSource()).document;
+  assert.deepEqual([...saved.querySelectorAll('input[type="checkbox"]')].map(el => el.checked), [true, false]);
+  assert.equal(saved.querySelectorAll('.step')[2].querySelector('input'), null);
+  assert.match(saved.querySelectorAll('.step')[2].textContent, /N\/A.*non applicable/i);
+  assert.match(saved.body.textContent, /copie locale.*aucune synchronisation/is);
+  assert.match(saved.body.textContent, /pas sauvegardées automatiquement/i);
+});
+
+test('print button invokes native print without persisting local changes', () => {
+  const html = generateWorkstationProcedureHtml(dossierSource());
+  const dom = new JSDOM(html, {runScripts:'dangerously'});
+  try {
+    const button = dom.window.document.querySelector('button[data-print]');
+    assert.ok(button);
+    assert.equal(button.textContent, 'Imprimer / Enregistrer en PDF');
+    let prints = 0; dom.window.print = () => { prints++; };
+    const checkbox = dom.window.document.querySelector('input');
+    checkbox.click(); assert.equal(checkbox.checked, false);
+    button.click(); assert.equal(prints, 1); assert.equal(checkbox.checked, false);
+    assert.match(dom.window.document.body.textContent, /destination.*Enregistrer en PDF/is);
+    assert.match(dom.window.document.body.textContent, /états.*enregistrés.*export/is);
+    assert.doesNotMatch(html, /localStorage|sessionStorage|fetch\(|XMLHttpRequest|indexedDB/);
+  } finally { dom.window.close(); }
+});
+
 test('selected authorized model renders without invented completion or dossier metadata', () => {
   const {html,document}=render(modelSource());
   assert.match(html,/^<!doctype html><html lang="fr-CA">/i);
   assert.match(document.body.textContent,/Acme TI.*Installation — Équipe TI/s);
   assert.match(document.body.textContent,/Préparation.*Clavier français.*Vérifier é et à/s);
   assert.match(document.body.textContent,/Modèle.*statut non renseigné/s);
-  assert.doesNotMatch(document.body.textContent,/Élodie|INC-123|0\s*\/\s*1|Terminé/);
+  assert.doesNotMatch(document.body.textContent,/Élodie|INC-123|0\s*\/\s*1|Terminé à Montréal/);
   assert.equal(document.querySelectorAll('.step-status').length,0);
 });
 
@@ -53,9 +82,14 @@ test('all supplied text is escaped in text and attributes; no executable or remo
   const source=dossierSource();
   source.dossier={...dossier,clientName:attack,employee:attack,computer:attack,ticket:attack,date:attack,sections:[{title:attack,steps:[{id:attack,title:attack,note:attack,etat:'fait',commentaire:attack}]}]};
   const {html,document}=render(source);
-  assert.equal(document.querySelectorAll('script,img,iframe,object,embed,form,button,input,textarea,select,link,style[src]').length,0);
+  assert.equal(document.querySelectorAll('img,iframe,object,embed,form,textarea,select,link,style[src]').length,0);
+  assert.equal(document.querySelectorAll('script').length,1);
+  assert.equal(document.querySelector('script').textContent,"document.querySelector('[data-print]').addEventListener('click',()=>window.print());");
+  assert.equal(document.querySelectorAll('button').length,1);
+  assert.equal(document.querySelectorAll('input').length,1);
+  assert.equal(document.querySelector('input').getAttribute('aria-label'),`Terminé localement — ${attack}`);
   assert.equal(document.querySelectorAll('[onerror],[onclick],[src],[href]').length,0);
-  assert.doesNotMatch(html,/<script|<img|<\/html><script/i);
+  assert.doesNotMatch(html,/<img|<\/html><script|<script>alert/i);
   assert.match(html,/&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.match(document.body.textContent,/<img src=x onerror=alert\(1\)>/);
   assert.doesNotMatch(html,/https?:\/\/|@import|url\(/i);
@@ -65,9 +99,10 @@ test('template metadata and section text are escaped too', () => {
   const source=modelSource(); const attack='</title><script>evil()</script>" &';
   source.clientName=attack; source.template={...template,name:attack,sections:[{title:attack,steps:[{id:'x',title:attack,note:attack}]}]};
   const {html,document}=render(source);
-  assert.equal(document.querySelectorAll('script').length,0);
+  assert.equal(document.querySelectorAll('script').length,1);
+  assert.equal(document.querySelector('script').textContent,"document.querySelector('[data-print]').addEventListener('click',()=>window.print());");
   assert.equal(document.title.includes(attack),true);
-  assert.doesNotMatch(html,/<script>|<\/title><script>/);
+  assert.doesNotMatch(html,/<script>evil|<\/title><script>/);
 });
 
 test('does not mutate source snapshot or retain live references', () => {
