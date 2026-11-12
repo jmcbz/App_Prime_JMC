@@ -34,14 +34,24 @@ const SCRIPT_TEMPLATE = String.raw`<#
     et produit un rapport HTML (+ résumé console). À lancer À LA FIN du montage,
     dans la session de l'USAGER (certains contrôles sont par profil : clavier, apps par défaut).
 .UTILISATION
-    PowerShell (idéalement en admin) :
-      powershell.exe -ExecutionPolicy Bypass -File .\Audit-MontagePoste.ps1
-    Rapport déposé sur le Bureau : AuditPoste_<NOMPC>_<date>.html
+    PowerShell (idéalement en admin) : remplacer le chemin ci-dessous par le fichier téléchargé.
+    Son nom dépend du client et de la procédure ; ne pas le renommer pour suivre cet exemple.
+      powershell.exe -ExecutionPolicy Bypass -File "<chemin exact du fichier téléchargé>" -Pause
+    Un chemin relatif part du dossier courant de PowerShell, pas automatiquement de Téléchargements.
+    Utiliser un chemin absolu entre guillemets (espaces, accents et OneDrive acceptés).
+    Rapport sur le Bureau : AuditPoste_<NOMPC>_<date>.html ; chemin complet affiché en console.
+    Si le chemin du Bureau est vide : repli dans le dossier du script, existant et accessible en écriture.
+    Pour choisir un autre dossier existant : -ReportDir "<dossier de rapport>" (aucun dossier créé).
+    -Pause est optionnel : attend Entrée avant la sortie, y compris en cas d'erreur de rapport.
+    Sans -Pause : aucune attente de saisie (automatisation).
+    Codes : 0 = conforme ; 1 = audit non validé, rapport produit ; 2 = erreur technique de rapport.
+    Le code 1 ne valide pas les étapes manuelles et ne signifie pas forcément un plantage.
 .NOTES
     Compatible Windows PowerShell 5.1 et PowerShell 7. v1 — BZ.
 #>
 param(
-    [string]$ReportDir = [Environment]::GetFolderPath('Desktop')
+    [string]$ReportDir = [Environment]::GetFolderPath('Desktop'),
+    [switch]$Pause
 )
 
 # Configuration client : valeurs de données littérales, jamais évaluées comme code.
@@ -265,9 +275,9 @@ $Manuels = @(
 )
 
 # ============================ RAPPORT ============================
-$ok     = ($Resultats | Where-Object { $_.Etat -eq 'OK' }).Count
-$echec  = ($Resultats | Where-Object { $_.Etat -eq 'ECHEC' }).Count
-$verif  = ($Resultats | Where-Object { $_.Etat -eq 'A VERIFIER' }).Count
+$ok     = @($Resultats | Where-Object { $_.Etat -eq 'OK' }).Count
+$echec  = @($Resultats | Where-Object { $_.Etat -eq 'ECHEC' }).Count
+$verif  = @($Resultats | Where-Object { $_.Etat -eq 'A VERIFIER' }).Count
 
 Write-Host ""
 Write-Host ("RÉSULTAT : {0} OK · {1} ÉCHEC · {2} À VÉRIFIER (+{3} points manuels)" -f $ok, $echec, $verif, $Manuels.Count) -ForegroundColor 'Yellow'
@@ -336,14 +346,25 @@ li{margin:4px 0}
 </div></body></html>
 "@
 
-$fichier = Join-Path $ReportDir ("AuditPoste_{0}_{1}.html" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd_HHmm'))
 try {
+    if (-not $PSBoundParameters.ContainsKey('ReportDir') -and [string]::IsNullOrWhiteSpace($ReportDir)) {
+        $ReportDir = $PSScriptRoot
+        Write-Host ("Bureau indisponible : rapport dans le dossier du script : {0}" -f $ReportDir) -ForegroundColor Yellow
+    }
+    if ([string]::IsNullOrWhiteSpace($ReportDir)) { throw 'ReportDir vide : préciser un dossier existant avec -ReportDir' }
     if (-not (Test-Path -LiteralPath $ReportDir -PathType Container)) { throw 'Dossier de rapport introuvable' }
+    $fichier = Join-Path $ReportDir ("AuditPoste_{0}_{1}.html" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd_HHmm'))
     $html | Out-File -LiteralPath $fichier -Encoding utf8 -ErrorAction Stop
-} catch { Write-Error ('Écriture du rapport impossible : {0}' -f $_.Exception.Message); exit 1 }
+} catch {
+    Write-Error ('Écriture du rapport impossible : {0}' -f $_.Exception.Message) -ErrorAction Continue
+    if ($Pause) { try { [void](Read-Host 'Appuyez sur Entrée pour fermer') } catch { Write-Warning 'Pause indisponible dans cette session' } }
+    exit 2
+}
 Write-Host ""
 Write-Host "Rapport : $fichier" -ForegroundColor Cyan
+if (-not $complete) { Write-Host 'Audit non validé : consulter les échecs et validations restantes dans le rapport (code 1).' -ForegroundColor Yellow }
 try { Start-Process -FilePath $fichier } catch {}
+if ($Pause) { try { [void](Read-Host 'Appuyez sur Entrée pour fermer') } catch { Write-Warning 'Pause indisponible dans cette session' } }
 exit $(if ($complete) { 0 } else { 1 })
 `;
 

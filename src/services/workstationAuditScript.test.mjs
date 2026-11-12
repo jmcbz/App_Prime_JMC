@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { writeFileSync, unlinkSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdtempSync, readFileSync, readdirSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -649,4 +649,190 @@ test('malformed or oversized procedure data fails closed rather than generating 
     [{title:'x',steps:Array.from({length:301},(_,i)=>({id:String(i),title:'x',note:''}))}]]) {
     assert.throws(()=>generateWorkstationAuditScript({...options,procedure:{name:'X',sections}}), /procédure/i);
   }
+});
+
+// Full-script runtime: Windows-only APIs are inert fixtures; pipelines/HTML/I/O/exit are real.
+const fullWindowsStubs = String.raw`param([string]$ScriptPath,[string]$ReportDir,[string]$Scenario='healthy',[switch]$UseDefaultReportDir,[switch]$PauseAudit)
+$ErrorActionPreference='Stop'
+$env:COMPUTERNAME='PC-FIXTURE'
+$env:USERNAME='Usager é <fixture>'
+$env:SystemDrive='C:'
+$global:FixtureScenario=$Scenario
+function Get-ItemProperty {
+ [CmdletBinding()]param([string]$Path)
+ if ($Path -like '*CurrentVersion' -and $Path -like '*Windows NT*') { return [pscustomobject]@{EditionID='Professional';ProductName='Windows';DisplayVersion='24H2';CurrentBuildNumber='26100'} }
+ if ($Path -like '*EnrollmentFixture*') {return [pscustomobject]@{ProviderID='MS DM Server'}}
+ if ($Path -like '*AppFixture*') {return [pscustomobject]@{DisplayName='Google Chrome';DisplayVersion='123'}}
+ if ($Path -like '*FileExts*') {return [pscustomobject]@{ProgId='Acrobat.Document.DC'}}
+ if ($Path -like '*UrlAssociations*') {return [pscustomobject]@{ProgId='ChromeHTML'}}
+ if ($Path -like '*LanguageResources') {return [pscustomobject]@{UILanguage=3084}}
+ throw "Unstubbed registry access: $Path"
+}
+function Get-ChildItem {
+ [CmdletBinding()]param([string]$Path)
+ if ($Path -like '*Enrollments') {return [pscustomobject]@{PSPath='HKLM:\EnrollmentFixture'}}
+ if ($Path -like '*Uninstall') {return [pscustomobject]@{PSPath='HKLM:\AppFixture'}}
+ throw "Unstubbed inventory: $Path"
+}
+function Test-Path {
+ [CmdletBinding(DefaultParameterSetName='Path')]param([Parameter(ParameterSetName='Path',Position=0)][string[]]$Path,[Parameter(ParameterSetName='Literal')][string[]]$LiteralPath,[string]$PathType)
+ if ($Path -match '^HK(LM|CU):') {return $true}
+ return Microsoft.PowerShell.Management\Test-Path @PSBoundParameters
+}
+function Get-LocalUser { [CmdletBinding()]param($Name) return [pscustomobject]@{SID='S-1-5-21-fixture';Enabled=$true} }
+function Get-LocalGroupMember { [CmdletBinding()]param($SID) return [pscustomobject]@{SID='S-1-5-21-fixture'} }
+function Get-AppxPackage { [CmdletBinding()]param() return @() }
+function Get-CimInstance { [CmdletBinding()]param($ClassName) return [pscustomobject]@{Manufacturer='Lenovo'} }
+function Get-WinUserLanguageList { return [pscustomobject]@{LanguageTag='fr-CA';InputMethodTips=@('0C0C:00001009')} }
+function Get-Printer { [CmdletBinding()]param() return [pscustomobject]@{Name='TOSHIBA.[ modèle é'} }
+function Get-BitLockerVolume { [CmdletBinding()]param($MountPoint) return [pscustomobject]@{ProtectionStatus='On';EncryptionPercentage=100} }
+function dsregcmd { $global:LASTEXITCODE=0; 'AzureAdJoined : YES' }
+function Start-Process { param($FilePath) Write-Host "FIXTURE_BROWSER_SUPPRESSED $FilePath" }
+function New-Object {
+ [CmdletBinding()]param([Parameter(Position=0)][string]$TypeName,[string]$ComObject)
+ if (-not $ComObject) { return ,(Microsoft.PowerShell.Utility\New-Object -TypeName $TypeName) }
+ if ($ComObject -ne 'Microsoft.Update.Session') {throw "Unstubbed COM: $ComObject"}
+ if ($global:FixtureScenario -eq 'com-create-throws') {throw 'Fixture COM creation unavailable'}
+ $searcher=[pscustomobject]@{}
+ $searcher | Add-Member ScriptMethod Search {
+  param($Criteria)
+  if ($global:FixtureScenario -eq 'com-search-throws') {throw 'Fixture COM search unavailable'}
+  $updates=[System.Collections.ArrayList]::new()
+  if ($global:FixtureScenario -eq 'one-update') {[void]$updates.Add([pscustomobject]@{Title='Correctif é unique'})}
+  if ($global:FixtureScenario -eq 'two-updates') {1..2 | ForEach-Object {[void]$updates.Add([pscustomobject]@{Title="Correctif $_"})}}
+  return [pscustomobject]@{Updates=$updates}
+ }
+ $global:FixtureSearcher=$searcher
+ $session=[pscustomobject]@{}
+ $session | Add-Member ScriptMethod CreateUpdateSearcher {return $global:FixtureSearcher}
+ return $session
+}
+function Read-Host { param($Prompt) Write-Host "FIXTURE_READ_HOST"; return "" }
+$invoke=@{}
+if ($PauseAudit) {$invoke.Pause=$true}
+if (-not $UseDefaultReportDir) {$invoke.ReportDir=$ReportDir}
+try {
+ & $ScriptPath @invoke
+ exit $LASTEXITCODE
+} catch {
+ [pscustomobject]@{ExceptionType=$_.Exception.GetType().FullName;FullyQualifiedErrorId=$_.FullyQualifiedErrorId;Message=$_.Exception.Message;Position=$_.InvocationInfo.PositionMessage;ScriptStackTrace=$_.ScriptStackTrace} | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path (Split-Path $ScriptPath) 'fatal-error.json') -Encoding utf8
+ throw
+}
+`;
+const fullSteps = [
+  ['bz-1-1', 'Installer / valider Windows 11 Pro'],
+  ['bz-1-4', 'Ajouter le compte admin local bzinc'],
+  ['bz-2-1', 'Mises à jour Windows'],
+  ['bz-2-7', "Installer l'imprimante du client"],
+  ['bz-3-3', 'Clavier : retirer les autres langues, garder FR/CA'],
+].map(([id,title]) => ({id,title,note:''}));
+const fullOptions = {...options,clientName:"L'Intendant é <img src=x onerror=alert(1)>",printerName:'TOSHIBA.[',apps:['Google Chrome'],procedure:{name:"Procédure é d'Intendant",source:'Modèle client',sections:[{title:'Préparation',steps:fullSteps}]}};
+function fullRun({dirMode='valid',pause=false,scenario='healthy',opts=fullOptions,transform=x=>x}={}, verify) {
+  const dir=mkdtempSync(join(process.env.TMPDIR || tmpdir(),'audit-full-'));
+  try {
+    const file=join(dir,'audit.ps1'),wrapper=join(dir,'windows-stubs.ps1');
+    const script=transform(generateWorkstationAuditScript(opts));
+    writeFileSync(file,'\ufeff'+script);writeFileSync(wrapper,fullWindowsStubs);
+    parse(script);
+    let reportDir=dir;
+    if(dirMode==='blank')reportDir='';
+    if(dirMode==='whitespace')reportDir=' \t ';
+    if(dirMode==='missing')reportDir=join(dir,'absent','Bureau');
+    if(dirMode==='onedrive') {reportDir=join(dir,'OneDrive - Client é','Bureau');mkdirSync(reportDir,{recursive:true});}
+    // The isolation runner mounts /opt/pwsh read-only. No OS configuration is written.
+    if(dirMode==='readonly')reportDir='/opt/pwsh';
+    const args=['-NoProfile','-NonInteractive','-File',wrapper,'-ScriptPath',file,'-Scenario',scenario];
+    if(dirMode==='default')args.push('-UseDefaultReportDir');else args.push('-ReportDir',reportDir);
+    if(pause)args.push('-PauseAudit');
+    const run=spawnSync('pwsh',args,{encoding:'utf8',timeout:20000});
+    const target=dirMode==='default'?dir:reportDir;
+    const reports=target && existsSync(target)?readdirSync(target).filter(x=>/^AuditPoste_PC-FIXTURE_.*\.html$/.test(x)):[];
+    const html=reports.length?readFileSync(join(target,reports[0]),'utf8'):'';
+    verify({...run,html,reports,reportDir:target,dir,fatal:existsSync(join(dir,'fatal-error.json'))});
+  } finally {rmSync(dir,{recursive:true,force:true});}
+}
+
+test('full script controls explicit blank report path with technical exit 2', () => {
+  fullRun({dirMode:'blank'}, run => {
+    assert.equal(run.status,2,run.stderr);
+    assert.match(run.stderr,/Écriture du rapport impossible.*ReportDir/s);
+    assert.equal(run.fatal,false);assert.equal(run.reports.length,0);
+    assert.doesNotMatch(run.stdout,/FIXTURE_READ_HOST/);
+  });
+});
+
+test('full script falls back to existing script directory when default Desktop is empty', () => {
+  fullRun({dirMode:'default'}, run => {
+    assert.equal(run.status,0,run.stderr);assert.equal(run.reports.length,1);
+    assert.match(run.stdout,/Bureau indisponible.*dossier du script/s);
+    assert.ok(run.stdout.includes(run.dir));assert.equal(run.fatal,false);
+  });
+});
+
+// Explicit PS5.1 scalar Count emulation on PS7, not a Windows 5.1 execution.
+for (const [label,scenario,opts,color,verdict] of [
+  ['failure','one-update',fullOptions,'#B4234A','NON CONFORME'],
+  ['verification','healthy',{...fullOptions,procedure:{...fullOptions.procedure,sections:[{title:'Préparation',steps:[...fullSteps,{id:'manual',title:'Vérification visuelle',note:''}]}]}},'#B45309','NON VALIDÉ'],
+]) test(`full script PS5.1 Count emulation keeps single ${label} KPI at 1`, () => {
+  fullRun({scenario,opts,transform:script=>script.replace('Categorie = $Categorie; Nom = $Nom; Etat = $Etat; Detail = $Detail','Count = $null; Categorie = $Categorie; Nom = $Nom; Etat = $Etat; Detail = $Detail')}, run => {
+    assert.equal(run.status,1,run.stderr);assert.equal(run.reports.length,1);
+    assert.ok(run.html.includes(`<b style='color:${color}'>1</b>`),'single-result KPI must be 1, not blank');
+    assert.ok(run.html.includes(`<div class='verdict'>${verdict}`));
+  });
+});
+
+for (const [label,params,exit] of [
+  ['complete',{},0],
+  ['incomplete',{opts:{...fullOptions,procedure:{...fullOptions.procedure,sections:[{title:'Validation',steps:[{id:'manual',title:'Validation humaine',note:''}]}]}}},1],
+  ['technical failure',{dirMode:'blank'},2],
+]) test(`full script explicit Pause reads once before ${label} exit`, () => {
+  fullRun({...params,pause:true}, run => {
+    assert.equal(run.status,exit,run.stderr);
+    assert.equal((run.stdout.match(/FIXTURE_READ_HOST/g)||[]).length,1);
+    if(exit!==2)assert.ok(run.stdout.indexOf('Rapport :') < run.stdout.indexOf('FIXTURE_READ_HOST'));
+    if(exit===1)assert.match(run.stdout,/Audit non validé/);
+  });
+});
+
+test('launch help supports dynamic downloaded filenames and documents cwd, reports, Pause and exit contract', () => {
+  for(const opts of [options,fullOptions]) {
+    const script=generateWorkstationAuditScript(opts);
+    assert.ok(script.includes('-File "<chemin exact du fichier téléchargé>" -Pause'));
+    assert.doesNotMatch(script,/Audit-MontagePoste\.ps1|audit-poste-windows\.ps1/);
+    assert.match(script,/dossier courant/);assert.match(script,/dossier du script/);
+    assert.match(script,/0 = conforme.*1 = audit non validé.*2 = erreur technique/s);
+    assert.match(script,/Sans -Pause.*aucune attente/s);
+  }
+});
+
+for(const dirMode of ['whitespace','missing','readonly']) test(`full script ${dirMode} report path fails under controlled technical exit`, () => {
+  fullRun({dirMode},run=>{
+    assert.equal(run.status,2,run.stderr);assert.match(run.stderr,/Écriture du rapport impossible/);
+    assert.equal(run.reports.length,0);assert.equal(run.fatal,false);
+    assert.doesNotMatch(run.stdout,/FIXTURE_READ_HOST/);
+  });
+});
+for(const [scenario,exit] of [['healthy',0],['one-update',1],['two-updates',1],['com-create-throws',1],['com-search-throws',1]]) test(`full script Windows Update ${scenario} writes consistent report without waiting`, () => {
+  fullRun({scenario,dirMode:'onedrive'},run=>{
+    assert.equal(run.status,exit,run.stderr);assert.equal(run.stderr,'');assert.equal(run.reports.length,1);
+    assert.doesNotMatch(run.stdout,/FIXTURE_READ_HOST/);
+    assert.match(run.html,/Client : L&#39;Intendant &#233; &lt;img/);
+    assert.match(run.html,/Procédure : Proc&#233;dure &#233; d&#39;Intendant/);
+    assert.doesNotMatch(run.html,/<img src=x|\uFFFD/);
+    const states=[...run.html.matchAll(/<span class='bdg'[^>]*>([^<]*)<\/span>/g)].map(m=>m[1]);
+    assert.equal(states.length,7);
+    for(const [text,color,label] of [['OK','#16763D','Conformes'],['ÉCHEC','#B4234A','Échecs'],['À VÉRIFIER','#B45309','À vérifier']]) {
+      const count=states.filter(x=>x.includes(text)).length;
+      assert.ok(run.html.includes(`<b style='color:${color}'>${count}</b><span>${label}</span>`),label);
+    }
+    assert.equal(run.html.includes("<div class='verdict'>CONFORME</div>"),exit===0);
+  });
+});
+test('full script PS5.1 Count emulation keeps single OK and multiple verification KPIs', () => {
+  const opts={...fullOptions,adminLocal:'',keyboards:[],printerName:'',apps:[],procedure:{name:'Manuel',sections:[{title:'Validation',steps:[{id:'manual',title:'Validation humaine',note:''}]}]}};
+  fullRun({opts,transform:s=>s.replace('Categorie = $Categorie; Nom = $Nom; Etat = $Etat; Detail = $Detail','Count = $null; Categorie = $Categorie; Nom = $Nom; Etat = $Etat; Detail = $Detail')},run=>{
+    assert.equal(run.status,1,run.stderr);assert.match(run.html,/<b style='color:#16763D'>1<\/b>/);
+    assert.match(run.html,/<b style='color:#B4234A'>0<\/b>/);
+    assert.match(run.html,/<b style='color:#B45309'>5<\/b>/);
+  });
 });

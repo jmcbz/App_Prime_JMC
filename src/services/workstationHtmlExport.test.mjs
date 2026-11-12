@@ -17,6 +17,14 @@ const modelSource = () => ({kind:'template',clientName:'Acme TI',template});
 const dossierSource = () => ({kind:'dossier',dossier});
 const render = source => { const html=generateWorkstationProcedureHtml(source); return {html,document:new JSDOM(html).window.document}; };
 
+test('checkbox labels contain Terminé without localement and preserve PDF guidance', () => {
+  const {html,document}=render(modelSource());
+  assert.equal(document.querySelector('.local-check span').textContent,'Terminé');
+  assert.equal(document.querySelector('input').getAttribute('aria-label'),'Terminé — Clavier français');
+  assert.doesNotMatch(html,/localement/i);
+  assert.match(html,/aucune synchronisation/i);
+});
+
 test('offline checklist starts blank for a model and preserves saved done/todo/N/A states', () => {
   const model = render(modelSource()).document;
   assert.equal(model.querySelectorAll('input[type="checkbox"]').length, 1);
@@ -51,7 +59,7 @@ test('selected authorized model renders without invented completion or dossier m
   assert.match(html,/^<!doctype html><html lang="fr-CA">/i);
   assert.match(document.body.textContent,/Acme TI.*Installation — Équipe TI/s);
   assert.match(document.body.textContent,/Préparation.*Clavier français.*Vérifier é et à/s);
-  assert.match(document.body.textContent,/Modèle.*statut non renseigné/s);
+  assert.match(document.body.textContent,/Procédure client.*statut non renseigné/s);
   assert.doesNotMatch(document.body.textContent,/Élodie|INC-123|0\s*\/\s*1|Terminé à Montréal/);
   assert.equal(document.querySelectorAll('.step-status').length,0);
 });
@@ -87,7 +95,7 @@ test('all supplied text is escaped in text and attributes; no executable or remo
   assert.equal(document.querySelector('script').textContent,"document.querySelector('[data-print]').addEventListener('click',()=>window.print());");
   assert.equal(document.querySelectorAll('button').length,1);
   assert.equal(document.querySelectorAll('input').length,1);
-  assert.equal(document.querySelector('input').getAttribute('aria-label'),`Terminé localement — ${attack}`);
+  assert.equal(document.querySelector('input').getAttribute('aria-label'),`Terminé — ${attack}`);
   assert.equal(document.querySelectorAll('[onerror],[onclick],[src],[href]').length,0);
   assert.doesNotMatch(html,/<img|<\/html><script|<script>alert/i);
   assert.match(html,/&lt;img src=x onerror=alert\(1\)&gt;/);

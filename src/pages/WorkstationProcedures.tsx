@@ -5,8 +5,8 @@ import { useAuth } from '../context/AuthContext';
 import { generateWorkstationAuditScript, DEFAULT_WORKSTATION_AUDIT_OPTIONS } from '../services/workstationAuditScript';
 import { generateWorkstationProcedureHtml } from '../services/workstationHtmlExport';
 import {
-  archiveDossier, createDossier, createTemplate, getDossier, getDossierByRequest, getTemplateByRequest, getStandardTemplate, listDossiers, listTemplates,
-  ProcedureApiError, updateDossier, updateTemplate, listWorkstationClients, getAuditTemplateSource, getAuditDossierSource,
+  createDossier, createTemplate, getDossier, getDossierByRequest, getTemplateByRequest, getStandardTemplate, listDossiers, listTemplates,
+  ProcedureApiError, updateTemplate, listWorkstationClients, getAuditTemplateSource,
   type WorkstationDossier, type WorkstationTemplate, type TemplateSection, type DossierSection,
 } from '../services/workstationProcedures';
 import type { ClientPrime } from '../services/dataService';
@@ -16,6 +16,11 @@ const message = (error: unknown) => error instanceof Error ? error.message : 'Er
 const today = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`; };
 const blank = { clientId: '', templateId: '', employee: '', computer: '', ticket: '', date: today() };
 const newSection = (): TemplateSection => ({ title: '', steps: [] });
+const exportName = (clientName: string, template: WorkstationTemplate, extension: string) => {
+  const slug = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0,70) || 'procedure';
+  // Encoded identity suffix distinguishes names that normalize to the same slug.
+  return `${slug(clientName)}-${slug(template.name)}-${template.clientId!.toString(36)}-${template.id.toString(36)}.${extension}`;
+};
 const inputClass = 'w-full min-w-0 rounded-lg border border-white/20 bg-bz-dark p-2 text-sm text-white disabled:opacity-60';
 const buttonClass = 'rounded-lg border border-white/20 px-3 py-2 text-sm text-white disabled:opacity-50';
 type Intent = {kind:'dossier';payload:Parameters<typeof createDossier>[0]} | {kind:'template';payload:Parameters<typeof createTemplate>[0]};
@@ -32,7 +37,7 @@ const mergeById=<T extends {id:number}>(old:T[],incoming:T[])=>[...old,...incomi
 const sameTemplate=(selected:WorkstationTemplate,fresh:WorkstationTemplate)=>
   selected.id===fresh.id && selected.version===fresh.version && selected.name===fresh.name && selected.clientId===fresh.clientId &&
   JSON.stringify(selected.sections)===JSON.stringify(fresh.sections);
-type Recovery = { creation: typeof blank; draft: WorkstationDossier | null; model: WorkstationTemplate | null; dirty: boolean; modelDirty: boolean; duplicating: boolean };
+type Recovery = { creation: typeof blank; draft: WorkstationDossier | null; model: WorkstationTemplate | null; dirty: boolean; modelDirty: boolean; duplicating: boolean; modelRequestKey: string | null };
 const recovery = new WeakMap<Window, { userId: number | null; snapshot: Recovery | null }>();
 
 export default function WorkstationProcedures() {
@@ -70,32 +75,37 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
   const [pendingInvalid]=useState(()=>{try{readPending(userId);return false;}catch{return true;}});
   const [draft, setDraft] = useState<WorkstationDossier | null>(restored.current?.draft ?? null);
   const [model, setModel] = useState<WorkstationTemplate | null>(restored.current?.model ?? null);
+  const [modelRequestKey, setModelRequestKey] = useState<string|null>(restored.current?.modelRequestKey ?? null);
   const [creation, setCreation] = useState(restored.current?.creation ?? { ...blank });
-  const creationDirty = Object.entries(blank).some(([key, value]) => creation[key as keyof typeof blank] !== value);
+  const creationDirty = false; // Client/procedure selection is not an unsaved record.
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [scriptConfirmed, setScriptConfirmed] = useState(false);
+  const denyAccess = () => {exportIdentity.current?.abort();setAccessDenied(true);};
   const [busy, setBusy] = useState(false);
-  const [dirty, setDirty] = useState(restored.current?.dirty ?? false);
+  const dirty = false; // Historical dossiers are consultation-only.
   const [modelDirty, setModelDirty] = useState(restored.current?.modelDirty ?? false);
   const [script, setScript] = useState({ prefix: DEFAULT_WORKSTATION_AUDIT_OPTIONS.computerPrefix, admin: DEFAULT_WORKSTATION_AUDIT_OPTIONS.adminLocal, keyboard: DEFAULT_WORKSTATION_AUDIT_OPTIONS.keyboards.join(', '), printer: DEFAULT_WORKSTATION_AUDIT_OPTIONS.printerName, apps: DEFAULT_WORKSTATION_AUDIT_OPTIONS.apps.join('\n') });
   const requestId = useRef(0);
+  const historyRequest = useRef(0);
   const locked = useRef(false);
   // Reconciliation owns the editor only until a person selects or edits another one.
   const editorRevision = useRef(0);
   const creationRevision = useRef(0);
   const scriptRevision = useRef(0);
-  const editorState = useRef({ dirty, modelDirty, creationDirty });
-  editorState.current = { dirty, modelDirty, creationDirty };
+  const editorState = useRef({ dirty, modelDirty, creationDirty, model, modelRequestKey });
+  editorState.current = { dirty, modelDirty, creationDirty, model, modelRequestKey };
   const confirmLeave = () => (!dirty && !modelDirty && !creationDirty) || window.confirm('Des modifications non sauvegardées seront perdues. Continuer ?');
   useEffect(() => {
     const entry = recovery.get(window);
     if (entry?.userId === userId) entry.snapshot = dirty || modelDirty || creationDirty
-      ? { draft, model, creation, dirty, modelDirty, duplicating } : null;
-  }, [userId, draft, model, creation, dirty, modelDirty, creationDirty, duplicating]);
+      ? { draft, model, creation, dirty, modelDirty, duplicating, modelRequestKey } : null;
+  }, [userId, draft, model, creation, dirty, modelDirty, creationDirty, duplicating, modelRequestKey]);
 
   useEffect(() => {
     let active = true;
-    const failed=(e:unknown)=>{if(active)setError(message(e));};
+    const failed=(e:unknown)=>{if(active){if(e instanceof ProcedureApiError && [401,403].includes(e.status))denyAccess();setError(message(e));}};
     void listWorkstationClients().then(c=>{if(active)setClients(c);}).catch(failed);
     void listTemplates().then(t=>{if(active){setTemplates(items=>mergeById(items,t.items));setTemplateBefore(t.nextBefore);}}).catch(failed);
     void getStandardTemplate().then(standard=>{if(active)setTemplates(items=>mergeById(items,[standard]));}).catch(failed);
@@ -134,7 +144,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     if (locked.current) return;
     locked.current = true; setBusy(true); setError(''); setNotice('');
     try { await action(); }
-    catch (e) { setError(e instanceof ProcedureApiError && e.status === 409 ? `Conflit de version : ${message(e)}. Vos modifications sont conservées; rechargez après les avoir copiées ou réessayez après vérification.` : message(e)); }
+    catch (e) { if(e instanceof ProcedureApiError && [401,403].includes(e.status))denyAccess();setError(e instanceof ProcedureApiError && e.status === 409 ? `Conflit de version : ${message(e)}. Vos modifications sont conservées; rechargez après les avoir copiées ou réessayez après vérification.` : message(e)); }
     finally { locked.current = false; setBusy(false); }
   };
   const runExport = async (action: (signal: AbortSignal) => Promise<void>) => {
@@ -142,13 +152,17 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     if (locked.current || exportLocked.current || !signal || signal.aborted || !auth.verified || auth.loading || auth.user?.id !== userId) return;
     exportLocked.current = true; activeExport.current = signal; setBusy(true); setError(''); setNotice('');
     try { await action(signal); }
-    catch (e) { if (!signal.aborted) setError(message(e)); }
+    catch (e) { if (!signal.aborted) {if(e instanceof ProcedureApiError && [401,403].includes(e.status))denyAccess();setError(message(e));} }
     finally { if (activeExport.current === signal) { activeExport.current = null; exportLocked.current = false; setBusy(false); } }
   };
-  const finishIntent=(intent:Intent,item:WorkstationDossier|WorkstationTemplate,editorAtStart:number,creationAtStart:number,ownsDraft=false)=>{
+  const finishIntent=(intent:Intent,item:WorkstationDossier|WorkstationTemplate,editorAtStart:number,_creationAtStart:number,ownsDraft=false)=>{
     const stored=readPending(userId);
     if(!stored)return; // Another readback has already reconciled this intent.
     if(stored.kind!==intent.kind||stored.payload.requestKey!==intent.payload.requestKey)throw Error('Création en attente différente : réconciliation bloquée');
+    if(intent.kind==='template'){
+      const saved=item as WorkstationTemplate;
+      if(saved.clientId!==intent.payload.clientId || saved.name!==intent.payload.name || JSON.stringify(saved.sections)!==JSON.stringify(intent.payload.sections))throw Error('Procédure confirmée différente : création à vérifier');
+    }
     window.sessionStorage.removeItem(pendingKey(userId!));
     if(window.sessionStorage.getItem(pendingKey(userId!))!==null)throw Error('Nettoyage de la création impossible');
     const current=editorState.current;
@@ -156,14 +170,20 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     if(intent.kind==='dossier'){
       const saved=item as WorkstationDossier;
       setDossiers(items=>mergeById(items,[saved]));
-      if(canSelect){setDraft(copy(saved));setModel(null);setDirty(false);setModelDirty(false);editorRevision.current++;}
-      if(creationRevision.current===creationAtStart&&(ownsDraft||!current.creationDirty))setCreation({...blank});
+      // Legacy receipt reconciliation may add history, never select a client procedure.
+      if(canSelect)setDraft(copy(saved));
       setNotice('Dossier créé.');
     }
     else {
       const saved=item as WorkstationTemplate;
       setTemplates(items=>mergeById(items,[saved]));
-      if(canSelect){setModel(copy(saved));setModelDirty(false);setDuplicating(false);editorRevision.current++;}
+      const linkedDraft=current.modelRequestKey===intent.payload.requestKey && current.model?.id===0;
+      if(linkedDraft){
+        // Rebase newer edits of this exact creation onto its saved identity.
+        // A different editor has no receipt link and must never be replaced.
+        const rebased={...copy(current.model!),id:saved.id,version:saved.version,clientId:saved.clientId};
+        setModel(rebased);setModelDirty(!sameTemplate(rebased,saved));setModelRequestKey(null);setDuplicating(false);editorRevision.current++;if(saved.clientId!==null)selectSaved(saved);
+      }else if(canSelect){setModel(copy(saved));setModelDirty(false);setModelRequestKey(null);setDuplicating(false);editorRevision.current++;if(saved.clientId!==null)selectSaved(saved);}
       setNotice('Modèle sauvegardé. Les dossiers déjà créés ne sont pas modifiés.');
     }
     setPending(null);
@@ -184,6 +204,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
       window.sessionStorage.setItem(pendingKey(userId),serialized);
       if(window.sessionStorage.getItem(pendingKey(userId))!==serialized)throw Error('Stockage de récupération indisponible');
       setPending(intent);
+      if(intent.kind==='template')setModelRequestKey(intent.payload.requestKey);
     }
     try {if(intent.kind==='dossier')await createDossier(intent.payload);else await createTemplate(intent.payload);}
     catch(e){
@@ -191,16 +212,16 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
         discardRejectedIntent();
         throw e;
       }
-      if(e instanceof ProcedureApiError&&[403,409].includes(e.status))throw e;
+      if(e instanceof ProcedureApiError&&[401,403,409].includes(e.status))throw e;
     }
     try {finishIntent(intent,await lookupIntent(intent),editorAtStart,creationAtStart,!retry);}
-    catch(e){throw Error(`Création non confirmée. Vérifiez ou réessayez avec la même clé. ${message(e)}`);}
+    catch(e){if(e instanceof ProcedureApiError&&[401,403].includes(e.status))denyAccess();throw Error(`Création non confirmée. Vérifiez ou réessayez avec la même clé. ${message(e)}`);}
   };
   useEffect(()=>{
     if(!pending)return;
     let active=true;
     const editorAtStart=editorRevision.current,creationAtStart=creationRevision.current;
-    void lookupIntent(pending).then(item=>{if(active)finishIntent(pending,item,editorAtStart,creationAtStart);}).catch(e=>{if(active&&!(e instanceof ProcedureApiError&&e.status===404))setError(`Création à vérifier : ${message(e)}`);});
+    void lookupIntent(pending).then(item=>{if(active)finishIntent(pending,item,editorAtStart,creationAtStart);}).catch(e=>{if(active&&!(e instanceof ProcedureApiError&&e.status===404)){if(e instanceof ProcedureApiError&&[401,403].includes(e.status))denyAccess();setError(`Création à vérifier : ${message(e)}`);}});
     return ()=>{active=false;};
     // Only on mount: 404 can be temporary and must never trigger a new key.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -213,123 +234,107 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     });
   };
   const openDossier = (id: number) => {
-    if (locked.current || !confirmLeave()) return;
-    const token = ++requestId.current;
+    if (locked.current) return;
+    const token = ++historyRequest.current;
     setError('');
-    void run(async () => { const item = await getDossier(id); if (token !== requestId.current) return; editorRevision.current++;setDraft(copy(item)); setModel(null); setDirty(false); setModelDirty(false); });
-  };
-  const mutateDossier = (change: (item: WorkstationDossier) => void) => {
-    if (!draft || draft.archivedAt) return;
-    const next = copy(draft); change(next); editorRevision.current++;setDraft(next); setDirty(true);
+    void run(async () => { const item = await getDossier(id); if (token !== historyRequest.current) return; setDraft(copy(item)); });
   };
   const mutateModel = (change: (item: WorkstationTemplate) => void) => {
     if (!model) return;
     const next = copy(model); change(next); editorRevision.current++;setModel(next); setModelDirty(true);
   };
-  const saveDossier = () => { if (!draft || draft.archivedAt) return; void run(async () => {
-    const updated = await updateDossier(draft.id, { expectedVersion: draft.version, employee: draft.employee, computer: draft.computer, ticket: draft.ticket, date: draft.date, sections: draft.sections });
-    setDraft(copy(updated)); setDossiers(items => items.map(i => i.id === updated.id ? updated : i)); setDirty(false); setNotice('Dossier sauvegardé.');
-  }); };
+
   const saveModel = () => { if (!model) return; void run(async () => {
     if(!model.id){await executeIntent({kind:'template',payload:{clientId:model.clientId,name:model.name,sections:copy(model.sections),requestKey:crypto.randomUUID()}});return;}
     const saved = await updateTemplate(model.id, { name: model.name, sections: model.sections, expectedVersion: model.version });
-    setTemplates(items => [...items.filter(i => i.id !== saved.id), saved]); setModel(copy(saved)); setModelDirty(false); setDuplicating(false); setNotice('Modèle sauvegardé. Les dossiers déjà créés ne sont pas modifiés.');
+    if(!sameTemplate({...model,version:saved.version},saved))throw Error('Procédure sauvegardée différente : rechargez avant export.');
+    setTemplates(items => [...items.filter(i => i.id !== saved.id), saved]); setModel(copy(saved)); setModelDirty(false); setDuplicating(false); if(saved.clientId!==null)selectSaved(saved); setNotice('Modèle sauvegardé. Les dossiers déjà créés ne sont pas modifiés.');
   }); };
-  const create = () => { if (!creation.clientId || !creation.templateId || !clients.some(c => String(c.id) === creation.clientId && c.clientType === 'ti')) { setError('Choisissez un client attribué et classé TI, puis un modèle.'); return; }
-    if ((dirty || modelDirty) && !window.confirm('Des modifications non sauvegardées seront perdues. Continuer ?')) return;
-    void run(async () => {
-      await executeIntent({kind:'dossier',payload:{requestKey:crypto.randomUUID(),clientId:Number(creation.clientId),templateId:Number(creation.templateId),employee:creation.employee,computer:creation.computer,ticket:creation.ticket,date:creation.date}});
-    });
+  const resetScript = () => { setScriptConfirmed(false);scriptRevision.current++;setScript({prefix:DEFAULT_WORKSTATION_AUDIT_OPTIONS.computerPrefix,admin:DEFAULT_WORKSTATION_AUDIT_OPTIONS.adminLocal,keyboard:DEFAULT_WORKSTATION_AUDIT_OPTIONS.keyboards.join(', '),printer:DEFAULT_WORKSTATION_AUDIT_OPTIONS.printerName,apps:DEFAULT_WORKSTATION_AUDIT_OPTIONS.apps.join('\n')}); };
+  const clearSelectionFeedback = () => { setNotice(''); setError(''); };
+  const selectSaved = (saved: WorkstationTemplate) => {
+    clearSelectionFeedback();
+    if(String(saved.clientId)!==creation.clientId)resetScript();
+    requestId.current++;creationRevision.current++;setCreation({...blank,clientId:String(saved.clientId),templateId:String(saved.id)});
   };
-  const archive = () => { if (!draft || dirty || !window.confirm('Archiver ce dossier ? Il deviendra en lecture seule.')) return;
-    void run(async () => { const saved = await archiveDossier(draft.id, draft.version); setDraft(copy(saved)); setDossiers(items => items.map(i => i.id === saved.id ? saved : i)); setNotice('Dossier archivé.'); });
+  const chooseClient = (id:string) => {
+    if(!confirmLeave())return;
+    clearSelectionFeedback();
+    if(id!==creation.clientId)resetScript();
+    requestId.current++;creationRevision.current++;editorRevision.current++;
+    setCreation({...blank,clientId:id});setModelRequestKey(null);setModel(null);setModelDirty(false);setDuplicating(false);
   };
-  const clientTemplates = templates.filter(t => t.clientId === null || String(t.clientId) === creation.clientId);
+  const chooseProcedure = (id:string) => {
+    if(!confirmLeave())return;
+    clearSelectionFeedback();
+    const saved=templates.find(t=>String(t.id)===id && t.clientId!==null && String(t.clientId)===creation.clientId);
+    requestId.current++;creationRevision.current++;editorRevision.current++;
+    setCreation({...creation,templateId:saved?String(saved.id):''});setModelRequestKey(null);setModel(saved?copy(saved):null);setModelDirty(false);setDuplicating(false);
+  };
+  const clientTemplates = templates.filter(t => t.clientId !== null && String(t.clientId) === creation.clientId);
   const progress = draft ? draft.sections.flatMap(s => s.steps).reduce((v, step) => ({ done: v.done + Number(step.etat === 'fait'), total: v.total + Number(step.etat !== 'na') }), { done: 0, total: 0 }) : null;
-  const updateScript = (key: keyof typeof script, value: string) => { scriptRevision.current++; setScript(current => ({ ...current, [key]: value })); };
+  const updateScript = (key: keyof typeof script, value: string) => { setScriptConfirmed(false);scriptRevision.current++; setScript(current => ({ ...current, [key]: value })); };
   const downloadScript = () => {
     if (locked.current || exportLocked.current) return;
-    if (draft && dirty) { setError('Sauvegardez le dossier avant de générer son audit.'); return; }
-    if (!draft && modelDirty) { setError('Sauvegardez le modèle ou annulez vos modifications en rouvrant le modèle avant de générer le script.'); return; }
+
+    if (modelDirty || (model !== null && !model.id)) { setError('Sauvegardez le modèle ou annulez vos modifications en rouvrant le modèle avant de générer le script.'); return; }
     if (pending || pendingInvalid) { setError('Confirmez la création en attente avant de générer son audit.'); return; }
     const selectedClient = clients.find(c => String(c.id) === creation.clientId && c.clientType === 'ti');
     const selectedTemplate = templates.find(t => String(t.id) === creation.templateId);
-    if (!draft && (!selectedClient || !selectedTemplate)) { setError('Choisissez un client TI et son modèle pour générer le script.'); return; }
+    if (!selectedClient || !selectedTemplate || selectedTemplate.clientId !== selectedClient.id) { setError('Choisissez un client TI et son modèle pour générer le script.'); return; }
     const selectionRevision = requestId.current;
     const creationAtStart = creationRevision.current;
+    const editorAtStart = editorRevision.current;
     const scriptAtStart = scriptRevision.current;
     const settings = { ...script };
     void runExport(async (signal) => {
       let clientName: string;
       let procedure: { name: string; sections: TemplateSection[] | DossierSection[] };
-      if (draft) {
-        const fresh = await getAuditDossierSource(draft.id); // Recheck assignment and the saved snapshot before download.
-        if (signal.aborted) return;
-        if (selectionRevision !== requestId.current || scriptAtStart !== scriptRevision.current) return;
-        if (fresh.id !== draft.id || fresh.clientId !== draft.clientId || fresh.version !== draft.version || JSON.stringify(fresh.sections) !== JSON.stringify(draft.sections)) {
-          throw new Error('Dossier modifié depuis son ouverture : rechargez-le avant de générer le script.');
-        }
-        if (!fresh.clientName.trim()) throw new Error('Client du dossier introuvable');
-        clientName = fresh.clientName;
-        procedure = { name: `Dossier d’installation — ${fresh.employee || fresh.computer || 'poste'}`, sections: fresh.sections };
-      } else {
-        const source = await getAuditTemplateSource(selectedClient!.id, selectedTemplate!.id);
-        if (signal.aborted) return;
-        if (selectionRevision !== requestId.current || creationAtStart !== creationRevision.current || scriptAtStart !== scriptRevision.current) return;
-        if (!sameTemplate(selectedTemplate!, source.template)) throw Error('Modèle modifié depuis sa sélection : rechargez-le avant de générer le script.');
-        clientName = source.client.nom;
-        procedure = { name: source.template.name, sections: source.template.sections };
-      }
+      const source = await getAuditTemplateSource(selectedClient!.id, selectedTemplate!.id);
+      if (signal.aborted) return;
+      if (selectionRevision !== requestId.current || creationAtStart !== creationRevision.current || scriptAtStart !== scriptRevision.current || editorAtStart !== editorRevision.current) return;
+      if (source.template.clientId !== selectedClient!.id || !sameTemplate(selectedTemplate!, source.template)) throw Error('Modèle modifié depuis sa sélection : rechargez-le avant de générer le script.');
+      clientName = source.client.nom;
+      procedure = { name: source.template.name, sections: source.template.sections };
       const text = generateWorkstationAuditScript({
         clientName, computerPrefix: settings.prefix, adminLocal: settings.admin,
         keyboards: settings.keyboard.split(',').map(v => v.trim()).filter(Boolean),
         printerName: settings.printer, apps: settings.apps.split('\n').map(v => v.trim()).filter(Boolean),
         procedure,
       });
-      if (signal.aborted || selectionRevision !== requestId.current || (!draft && creationAtStart !== creationRevision.current) || scriptAtStart !== scriptRevision.current) return;
+      if (signal.aborted || selectionRevision !== requestId.current || creationAtStart !== creationRevision.current || scriptAtStart !== scriptRevision.current) return;
       const url = URL.createObjectURL(new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' }));
-      const a = document.createElement('a'); a.href = url; a.download = 'audit-poste-windows.ps1'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const a = document.createElement('a'); a.href = url; a.download = exportName(clientName, source.template, 'ps1'); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       setNotice(`Script généré pour ${clientName} selon ${procedure.name}.`);
     });
   };
   const downloadHtml = () => {
     if (locked.current || exportLocked.current) return;
-    if (draft && dirty) { setError('Sauvegardez le dossier avant de télécharger sa procédure HTML.'); return; }
-    if (!draft && modelDirty) { setError('Sauvegardez le modèle ou annulez vos modifications avant de télécharger sa procédure HTML.'); return; }
+
+    if (modelDirty || (model !== null && !model.id)) { setError('Sauvegardez le modèle ou annulez vos modifications avant de télécharger sa procédure HTML.'); return; }
     if (pending || pendingInvalid) { setError('Confirmez la création en attente avant de télécharger la procédure HTML.'); return; }
     const selectedClient = clients.find(c => String(c.id) === creation.clientId && c.clientType === 'ti');
     const selectedTemplate = templates.find(t => String(t.id) === creation.templateId);
-    if (!draft && (!selectedClient || !selectedTemplate)) { setError('Choisissez un client TI et son modèle pour télécharger la procédure HTML.'); return; }
+    if (!selectedClient || !selectedTemplate || selectedTemplate.clientId !== selectedClient.id) { setError('Choisissez un client TI et son modèle pour télécharger la procédure HTML.'); return; }
     const selectionRevision = requestId.current;
     const creationAtStart = creationRevision.current;
+    const editorAtStart = editorRevision.current;
     void runExport(async (signal) => {
       let html: string;
       let clientName: string;
-      if (draft) {
-        const fresh = await getAuditDossierSource(draft.id);
-        if (signal.aborted) return;
-        if (selectionRevision !== requestId.current) return;
-        const metadata = ['clientName', 'employee', 'computer', 'ticket', 'date', 'archivedAt'] as const;
-        if (fresh.id !== draft.id || fresh.clientId !== draft.clientId || fresh.version !== draft.version ||
-            metadata.some(key => fresh[key] !== draft[key]) || JSON.stringify(fresh.sections) !== JSON.stringify(draft.sections)) {
-          throw new Error('Dossier modifié depuis son ouverture : rechargez-le avant de télécharger la procédure HTML.');
-        }
-        clientName = fresh.clientName;
-        html = generateWorkstationProcedureHtml({ kind: 'dossier', dossier: fresh });
-      } else {
-        const source = await getAuditTemplateSource(selectedClient!.id, selectedTemplate!.id);
-        if (signal.aborted) return;
-        if (selectionRevision !== requestId.current || creationAtStart !== creationRevision.current) return;
-        if (!sameTemplate(selectedTemplate!, source.template)) throw Error('Modèle modifié depuis sa sélection : rechargez-le avant de télécharger la procédure HTML.');
-        clientName = source.client.nom;
-        html = generateWorkstationProcedureHtml({ kind: 'template', clientName, template: source.template });
-      }
-      if (signal.aborted || selectionRevision !== requestId.current || (!draft && creationAtStart !== creationRevision.current)) return;
+      const source = await getAuditTemplateSource(selectedClient!.id, selectedTemplate!.id);
+      if (signal.aborted) return;
+      if (selectionRevision !== requestId.current || creationAtStart !== creationRevision.current || editorAtStart !== editorRevision.current) return;
+      if (source.template.clientId !== selectedClient!.id || !sameTemplate(selectedTemplate!, source.template)) throw Error('Modèle modifié depuis sa sélection : rechargez-le avant de télécharger la procédure HTML.');
+      clientName = source.client.nom;
+      html = generateWorkstationProcedureHtml({ kind: 'template', clientName, template: source.template });
+      if (signal.aborted || selectionRevision !== requestId.current || creationAtStart !== creationRevision.current) return;
       const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
-      const a = document.createElement('a'); a.href = url; a.download = 'procedure-installation-poste.html'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const a = document.createElement('a'); a.href = url; a.download = exportName(clientName, source.template, 'html'); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       setNotice(`Procédure HTML générée pour ${clientName}. Vérifiez les téléchargements de votre navigateur.`);
     });
   };
+  if(accessDenied || !auth.verified || auth.loading || auth.user?.id!==userId)return <Page><p role="alert">Accès refusé ou session à vérifier. Rechargez après vérification de vos droits.</p></Page>;
   return <Page>
     <style data-workstation-print>{`@media print {
       .min-h-screen { min-height: 0 !important; }
@@ -341,41 +346,42 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
       .workstation-print-control { display: none !important; }
       .workstation-print-answer { display: block !important; color: #000 !important; white-space: pre-wrap; overflow-wrap: anywhere; }
     }`}</style>
-    <PageHeader titre="Installation de postes" sousTitre="Modèles partagés, dossiers d'installation et audit Windows" />
+    <PageHeader titre="Procédures par client" sousTitre="Procédures générales, gabarits réutilisables et historiques" />
     {error && <p role="alert" className="mb-4 rounded-lg border border-red-500 p-3 text-red-300">{error}</p>}
     {notice && <p role="status" className="mb-4 text-green-300">{notice}</p>}
     {(pending||pendingInvalid)&&<div role="status" className="mb-4 text-amber-300">Création en attente de confirmation. Aucune nouvelle création autorisée. {pending&&<><button className={buttonClass} disabled={busy} onClick={()=>void run(async()=>{const editorAtStart=editorRevision.current,creationAtStart=creationRevision.current;finishIntent(pending,await lookupIntent(pending),editorAtStart,creationAtStart);})}>Vérifier la création</button><button className={buttonClass} disabled={busy} onClick={()=>void run(()=>executeIntent(pending,true))}>Réessayer la création {pending.kind==='dossier'?'du dossier':'du modèle'}</button></>}</div>}
     <div className="grid gap-5 lg:grid-cols-2 print:hidden">
-      <Card><fieldset disabled={busy}><h2 className="mb-3 text-lg font-semibold text-white">Nouveau dossier</h2>
+      <Card><fieldset disabled={busy}><h2 className="mb-3 text-lg font-semibold text-white">Procédure générale du client</h2>
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="text-sm text-slate-300">Client<select aria-label="Client" className={inputClass} value={creation.clientId} onChange={e => {creationRevision.current++;setCreation({ ...creation, clientId: e.target.value, templateId: '' });}}><option value="">Choisir</option>{clients.map(c => <option key={c.id} value={c.id} disabled={c.clientType !== 'ti'}>{c.nom}{c.clientType === 'ti' ? '' : ' — À classer TI dans Clients'}</option>)}</select></label>
-          <label className="text-sm text-slate-300">Modèle<select aria-label="Modèle" className={inputClass} value={creation.templateId} onChange={e => {creationRevision.current++;setCreation({ ...creation, templateId: e.target.value });}}><option value="">Choisir</option>{clientTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
-          {(['employee', 'computer', 'ticket', 'date'] as const).map((key) => <label key={key} className="text-sm text-slate-300">{{ employee: 'Employé', computer: 'Ordinateur', ticket: 'Billet', date: 'Date' }[key]}<input aria-label={{ employee: 'Employé', computer: 'Ordinateur', ticket: 'Billet', date: 'Date' }[key]} type={key === 'date' ? 'date' : 'text'} className={inputClass} value={creation[key]} onChange={e => {creationRevision.current++;setCreation({ ...creation, [key]: e.target.value });}} /></label>)}
-        </div>{clients.some(c => c.clientType !== 'ti') && <p className="mt-3 text-sm text-amber-300">Les clients non classés sont visibles, mais un administrateur doit les classer TI dans « Clients » avant leur sélection.</p>}<button disabled={busy||!!pending||pendingInvalid} className={`${buttonClass} mt-4`} onClick={create}>Créer le dossier</button></fieldset>
-      </Card>
-      <Card><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold text-white">Modèles de procédure</h2><button className={buttonClass} disabled={busy} onClick={() => { if (!confirmLeave()) return; editorRevision.current++;setModel({ id: 0, clientId: isAdmin ? null : (clients.find(c => c.clientType === 'ti')?.id ?? null), name: '', version: 0, sections: [] }); setDuplicating(false); setDraft(null); setDirty(false); setModelDirty(false); }}>Nouveau modèle</button></div>
-        <p className="mb-3 text-xs text-slate-400">Modèles globaux ou propres à un client TI. Modifier un modèle ne change jamais les dossiers existants.</p>
-        <div className="space-y-2">{templates.map(t => <div key={t.id} className="flex flex-wrap gap-2">{(isAdmin || t.clientId !== null) && <button className={`${buttonClass} min-w-0 flex-1 text-left`} disabled={busy} onClick={() => { if (!confirmLeave()) return; requestId.current++;editorRevision.current++; setModel(copy(t)); setDuplicating(false); setDraft(null); setDirty(false); setModelDirty(false); }}>{t.name} · {t.clientId == null ? 'Global' : clients.find(c => c.id === t.clientId)?.nom || 'Client TI'}</button>}{t.clientId === null && <button className={buttonClass} disabled={busy} onClick={() => { if (!confirmLeave()) return; requestId.current++;editorRevision.current++; setModel({ ...copy(t), id: 0, clientId: null, version: 0 }); setDuplicating(true); setDraft(null); setDirty(false); setModelDirty(true); }}>Dupliquer pour un client · {t.name}</button>}</div>)}</div>{templateBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('template')}>Charger plus de modèles</button>}
+          <label className="text-sm text-slate-300">Client<select aria-label="Client" className={inputClass} value={creation.clientId} onChange={e => chooseClient(e.target.value)}><option value="">Choisir</option>{clients.map(c => <option key={c.id} value={c.id} disabled={c.clientType !== 'ti'}>{c.nom}{c.clientType === 'ti' ? '' : ' — À classer TI dans Clients'}</option>)}</select></label>
+          <label className="text-sm text-slate-300">Procédure enregistrée<select aria-label="Modèle" className={inputClass} value={creation.templateId} onChange={e => chooseProcedure(e.target.value)}><option value="">Choisir une procédure</option>{clientTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+        </div><p className="mt-3 text-sm text-slate-300">Choisissez une procédure enregistrée ou créez une variante pour ce client. Aucun employé, poste, billet ou date requis.</p>
+        <button className={`${buttonClass} mt-3`} disabled={busy || !!pending || pendingInvalid || !clients.some(c=>String(c.id)===creation.clientId && c.clientType==='ti')} onClick={()=>{if(!confirmLeave())return;clearSelectionFeedback();requestId.current++;editorRevision.current++;setModelRequestKey(null);setModel({id:0,clientId:Number(creation.clientId),name:'',version:0,sections:[]});setModelDirty(true);setDuplicating(false);}}>Nouvelle procédure client</button>
+        {clients.filter(c=>c.clientType==='ti').map(c=><section key={c.id} aria-label={`Procédures — ${c.nom}`} className="mt-4"><h3 className="font-semibold text-white">{c.nom}</h3>{templates.filter(t=>t.clientId===c.id).map(t=><button key={t.id} className={`${buttonClass} mt-2 w-full text-left`} onClick={()=>{if(!confirmLeave())return;selectSaved(t);editorRevision.current++;setModelRequestKey(null);setModel(copy(t));setModelDirty(false);setDuplicating(false);}}>{t.name}</button>)}</section>)}
+      </fieldset></Card>
+      <Card><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold text-white">Gabarits globaux réutilisables</h2>{isAdmin&&<button className={buttonClass} disabled={busy} onClick={()=>{if(!confirmLeave())return;clearSelectionFeedback();requestId.current++;editorRevision.current++;setModelRequestKey(null);setModel({id:0,clientId:null,name:'',version:0,sections:[]});setModelDirty(true);setDuplicating(false);}}>Nouveau modèle global</button>}</div>
+        <p className="mb-3 text-xs text-slate-400">Dupliquez un gabarit pour le client avant de produire sa procédure. Les historiques restent inchangés.</p>
+        <div className="space-y-2">{templates.filter(t=>t.clientId===null).map(t=><div key={t.id} className="flex flex-wrap gap-2">{isAdmin&&<button className={buttonClass} disabled={busy} onClick={()=>{if(!confirmLeave())return;clearSelectionFeedback();requestId.current++;editorRevision.current++;setModelRequestKey(null);setModel(copy(t));setModelDirty(false);setDuplicating(false);}}>{t.name} · Global</button>}<button className={buttonClass} disabled={busy} onClick={()=>{if(!confirmLeave())return;clearSelectionFeedback();requestId.current++;editorRevision.current++;setModelRequestKey(null);setModel({...copy(t),id:0,clientId:null,version:0});setDuplicating(true);setModelDirty(true);}}>Dupliquer pour un client · {t.name}</button></div>)}</div>{templateBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('template')}>Charger plus de modèles</button>}
       </Card>
     </div>
-    <Card className="my-5 print:hidden"><h2 className="mb-3 text-lg font-semibold text-white">Dossiers partagés</h2><div className="grid gap-2 sm:grid-cols-2">{dossiers.map(d => <button key={d.id} disabled={busy} className={`${buttonClass} text-left`} onClick={() => openDossier(d.id)}>Ouvrir {d.employee || `dossier ${d.id}`} · {d.clientName}{d.archivedAt ? ' · Archivé' : ''}</button>)}</div>{dossierBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('dossier')}>Charger plus de dossiers</button>}</Card>
-    {model && <Card className="my-5 print:hidden"><fieldset disabled={busy}><h2 className="mb-4 text-lg font-semibold text-white">Éditeur de modèle</h2>
+    <Card className="my-5 print:hidden"><h2 className="mb-3 text-lg font-semibold text-white">Historiques des dossiers — consultation seulement</h2><p className="text-sm text-slate-300">Ouvrir un historique ne change pas la procédure client sélectionnée ni ses exports.</p>{Array.from(new Set(dossiers.map(d=>d.clientId))).map(clientId=><section key={clientId} aria-label={`Historiques — ${dossiers.find(d=>d.clientId===clientId)!.clientName}`} className="mt-4"><h3 className="font-semibold text-white">{dossiers.find(d=>d.clientId===clientId)!.clientName}</h3><div className="grid gap-2 sm:grid-cols-2">{dossiers.filter(d=>d.clientId===clientId).map(d=><button key={d.id} disabled={busy} className={`${buttonClass} text-left`} onClick={()=>openDossier(d.id)}>Ouvrir {d.employee || d.computer || 'dossier historique'} · {d.clientName}{d.archivedAt?' · Archivé':''}</button>)}</div></section>)}{dossierBefore&&<button className={buttonClass} disabled={busy} onClick={()=>loadMore('dossier')}>Charger plus de dossiers</button>}</Card>
+    {model && <Card className="my-5 print:hidden"><fieldset disabled={busy}><h2 className="mb-4 text-lg font-semibold text-white">Éditeur de procédure / gabarit</h2>
       <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm text-slate-300">Nom du modèle<input aria-label="Nom du modèle" className={inputClass} value={model.name} onChange={e => mutateModel(t => { t.name = e.target.value; })} /></label>
-      {!model.id && <label className="text-sm text-slate-300">Portée<select aria-label="Client du modèle" className={inputClass} value={model.clientId ?? ''} onChange={e => mutateModel(t => { t.clientId = e.target.value ? Number(e.target.value) : null; })}>{duplicating && <option value="">Choisir un client TI</option>}{isAdmin && !duplicating && <option value="">Global</option>}{clients.filter(c => c.clientType === 'ti').map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}</select></label>}</div>
+      {!model.id && <label className="text-sm text-slate-300">Portée<select aria-label="Client du modèle" disabled={!!pending && modelRequestKey===pending.payload.requestKey} className={inputClass} value={model.clientId ?? ''} onChange={e => mutateModel(t => { t.clientId = e.target.value ? Number(e.target.value) : null; })}>{duplicating && <option value="">Choisir un client TI</option>}{isAdmin && !duplicating && <option value="">Global</option>}{clients.filter(c => c.clientType === 'ti').map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}</select></label>}</div>
       {model.sections.map((section, i) => <div key={i} className="mt-4 rounded-lg border border-white/10 p-3"><div className="flex gap-2"><input aria-label={`Titre de section ${i + 1}`} className={inputClass} placeholder="Titre de section" value={section.title} onChange={e => mutateModel(t => { t.sections[i].title = e.target.value; })} /><button className={buttonClass} onClick={() => mutateModel(t => { t.sections.splice(i, 1); })}>Retirer la section {i + 1}</button></div>
         {section.steps.map((step, j) => <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_1fr_auto]" key={step.id}><input aria-label={`Titre étape ${i + 1}.${j + 1}`} className={inputClass} placeholder="Étape" value={step.title} onChange={e => mutateModel(t => { t.sections[i].steps[j].title = e.target.value; })} /><input aria-label={`Note étape ${i + 1}.${j + 1}`} className={inputClass} placeholder="Note" value={step.note} onChange={e => mutateModel(t => { t.sections[i].steps[j].note = e.target.value; })} /><button className={buttonClass} onClick={() => mutateModel(t => { t.sections[i].steps.splice(j, 1); })}>Retirer l’étape</button></div>)}
         <button className={`${buttonClass} mt-2`} onClick={() => mutateModel(t => { t.sections[i].steps.push({ id: crypto.randomUUID(), title: '', note: '' }); })}>Ajouter une étape {i + 1}</button></div>)}
       <div className="mt-4 flex flex-wrap gap-2"><button className={buttonClass} onClick={() => mutateModel(t => { t.sections.push(newSection()); })}>Ajouter une section</button><button className={buttonClass} disabled={busy || (!model.id&&(!!pending||pendingInvalid)) || ((duplicating || !isAdmin) && !model.clientId) || !model.name.trim() || !model.sections.length || model.sections.some(s => !s.title.trim() || !s.steps.length || s.steps.some(step => !step.title.trim()))} onClick={saveModel}>Sauvegarder le modèle</button></div>
     </fieldset></Card>}
-    {draft && <Card className="my-5 print:border-0 print:bg-white print:text-black"><fieldset disabled={busy}><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-bold text-white print:text-black">Dossier d’installation — {draft.clientName}</h2><p className="text-sm text-slate-300 print:text-black">{draft.archivedAt ? 'Archivé · Lecture seule' : 'Dossier actif'} · {progress?.done} / {progress?.total} étapes applicables terminées</p></div><button className={`${buttonClass} print:hidden`} disabled={dirty} onClick={() => window.print()}>Imprimer</button></div>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">{(['employee', 'computer', 'ticket', 'date'] as const).map(key => <label key={key} className="text-sm text-slate-300 print:text-black">{{employee:'Employé',computer:'Ordinateur',ticket:'Billet',date:'Date'}[key]}<input aria-label={{employee:'Employé',computer:'Ordinateur',ticket:'Billet',date:'Date'}[key]} className={`${inputClass} print:border-black print:bg-white print:text-black`} type={key === 'date' ? 'date' : 'text'} value={draft[key]} disabled={!!draft.archivedAt} onChange={e => mutateDossier(d => { d[key] = e.target.value; })} /></label>)}</div>
-      {draft.sections.map((section: DossierSection, i) => <section key={i} className="mt-5"><h3 className="mb-2 font-semibold text-white print:text-black">{section.title}</h3>{section.steps.map((step, j) => <div key={step.id} className="workstation-print-area mb-3 rounded-lg border border-white/10 p-3 print:border-black"><div className="font-medium text-white print:text-black">{step.title}</div>{step.note && <p className="text-sm text-slate-400 print:text-black">{step.note}</p>}<div className="mt-2 grid gap-2 sm:grid-cols-[auto_1fr]"><label className="text-xs text-slate-300 print:text-black">État<select aria-label={`État — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.etat} disabled={!!draft.archivedAt} onChange={e => mutateDossier(d => { d.sections[i].steps[j].etat = e.target.value as 'todo' | 'fait' | 'na'; })}><option value="todo">À faire</option><option value="fait">Fait</option><option value="na">N/A</option></select><span className="workstation-print-answer hidden">{{todo:'À faire',fait:'Fait',na:'N/A'}[step.etat]}</span></label><label className="text-xs text-slate-300 print:text-black">Commentaire<textarea aria-label={`Commentaire — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.commentaire} disabled={!!draft.archivedAt} onChange={e => mutateDossier(d => { d.sections[i].steps[j].commentaire = e.target.value; })} /><span className="workstation-print-answer hidden">{step.commentaire}</span></label></div></div>)}</section>)}
-      {!draft.archivedAt && <div className="flex flex-wrap gap-2 print:hidden"><button className={buttonClass} disabled={busy || !dirty} onClick={saveDossier}>Sauvegarder le dossier</button><button className={buttonClass} disabled={busy || dirty} onClick={archive}>Archiver le dossier</button></div>}
+    {draft && <Card className="my-5 print:border-0 print:bg-white print:text-black"><fieldset disabled={busy}><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-bold text-white print:text-black">Dossier d’installation — {draft.clientName}</h2><p className="text-sm text-slate-300 print:text-black">{draft.archivedAt ? 'Archivé · Lecture seule' : 'Historique · Lecture seule'} · {progress?.done} / {progress?.total} étapes applicables terminées</p></div><button className={`${buttonClass} print:hidden`} disabled={dirty} onClick={() => window.print()}>Imprimer</button></div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">{(['employee', 'computer', 'ticket', 'date'] as const).map(key => <label key={key} className="text-sm text-slate-300 print:text-black">{{employee:'Employé',computer:'Ordinateur',ticket:'Billet',date:'Date'}[key]}<input aria-label={{employee:'Employé',computer:'Ordinateur',ticket:'Billet',date:'Date'}[key]} className={`${inputClass} print:border-black print:bg-white print:text-black`} type={key === 'date' ? 'date' : 'text'} value={draft[key]} disabled readOnly /></label>)}</div>
+      {draft.sections.map((section: DossierSection, i) => <section key={i} className="mt-5"><h3 className="mb-2 font-semibold text-white print:text-black">{section.title}</h3>{section.steps.map(step => <div key={step.id} className="workstation-print-area mb-3 rounded-lg border border-white/10 p-3 print:border-black"><div className="font-medium text-white print:text-black">{step.title}</div>{step.note && <p className="text-sm text-slate-400 print:text-black">{step.note}</p>}<div className="mt-2 grid gap-2 sm:grid-cols-[auto_1fr]"><label className="text-xs text-slate-300 print:text-black">État<select aria-label={`État — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.etat} disabled><option value="todo">À faire</option><option value="fait">Fait</option><option value="na">N/A</option></select><span className="workstation-print-answer hidden">{{todo:'À faire',fait:'Fait',na:'N/A'}[step.etat]}</span></label><label className="text-xs text-slate-300 print:text-black">Commentaire<textarea aria-label={`Commentaire — ${step.title}`} className={`${inputClass} workstation-print-control`} value={step.commentaire} disabled readOnly /><span className="workstation-print-answer hidden">{step.commentaire}</span></label></div></div>)}</section>)}
+
     </fieldset></Card>}
-    <Card className="my-5 print:hidden"><h2 className="text-lg font-semibold text-white">Procédure HTML hors ligne</h2><p className="my-2 text-sm text-slate-300">Téléchargez la procédure du dossier enregistré ouvert ou du modèle choisi pour le client TI. Le fichier autonome est une checklist cochable hors ligne. Utilisez « Imprimer / Enregistrer en PDF » pour conserver les coches sur papier ou en PDF : elles ne sont pas sauvegardées automatiquement. Copie locale, aucune synchronisation ni modification du dossier partagé dans Prime.</p><button className={`${buttonClass} mt-2`} disabled={busy} onClick={downloadHtml}>Télécharger la procédure HTML</button></Card>
+    <Card className="my-5 print:hidden"><h2 className="text-lg font-semibold text-white">Procédure HTML hors ligne</h2><p className="my-2 text-sm text-slate-300">Téléchargez uniquement la procédure générale enregistrée sélectionnée pour le client TI, indépendamment de l’historique ouvert. Le fichier autonome est une checklist cochable hors ligne. Utilisez « Imprimer / Enregistrer en PDF » pour conserver les coches sur papier ou en PDF : elles ne sont pas sauvegardées automatiquement. Copie locale, aucune synchronisation ni modification du dossier partagé dans Prime.</p><button className={`${buttonClass} mt-2`} disabled={busy} onClick={downloadHtml}>Télécharger la procédure HTML</button></Card>
     <Card className="my-5 print:hidden"><h2 className="text-lg font-semibold text-white">Générateur de script d’audit Windows</h2><p className="my-2 text-sm text-amber-300">Le script valide uniquement des éléments du poste Windows. Installation, configuration et autres tâches manuelles restent à vérifier par le technicien. Aucun script n’est exécuté dans le navigateur ou sur le serveur.</p>
-      <p role="status" className="my-2 text-sm text-slate-200">Source : {draft ? `dossier enregistré de ${draft.clientName} (procédure figée)` : `modèle ${templates.find(t => String(t.id) === creation.templateId)?.name ?? 'à choisir'} du client ${clients.find(c => String(c.id) === creation.clientId)?.nom ?? 'à choisir'}`}.</p>
-      <p className="my-2 text-xs text-amber-300">Les paramètres préremplis sont ceux de BZ : confirmez le préfixe, le compte, le clavier, l’imprimante et les applications pour ce client avant de télécharger. Les étapes non automatisables resteront à vérifier.</p>
+      <p role="status" className="my-2 text-sm text-slate-200">Source : {`procédure enregistrée ${templates.find(t => String(t.id) === creation.templateId)?.name ?? 'à choisir'} du client ${clients.find(c => String(c.id) === creation.clientId)?.nom ?? 'à choisir'}`}.</p>
+      <p className="my-2 text-xs text-amber-300">{scriptConfirmed ? `Paramètres confirmés pour ${clients.find(c=>String(c.id)===creation.clientId)?.nom}.` : "Les paramètres préremplis sont ceux de BZ : confirmez le préfixe, le compte, le clavier, l’imprimante et les applications pour ce client avant de télécharger."} Les étapes non automatisables resteront à vérifier.</p><button className={buttonClass} disabled={busy || !creation.clientId} onClick={()=>setScriptConfirmed(true)}>Confirmer les paramètres pour {clients.find(c=>String(c.id)===creation.clientId)?.nom ?? 'le client à choisir'}</button>
       <div className="grid gap-3 sm:grid-cols-2">{(['prefix','admin','keyboard','printer','apps'] as const).map(key => <label className="text-sm text-slate-300" key={key}>{{prefix:'Préfixe du client',admin:'Compte administrateur',keyboard:'Clavier attendu',printer:'Motif de l’imprimante (ex. TOSHIBA; vide = à vérifier)',apps:'Applications attendues (une par ligne)'}[key]}{key === 'apps' ? <textarea aria-label="Applications attendues" className={inputClass} value={script[key]} onChange={e => updateScript(key, e.target.value)} /> : <input aria-label={{prefix:'Préfixe du client',admin:'Compte administrateur',keyboard:'Clavier attendu',printer:'Motif de l’imprimante',apps:''}[key]} className={inputClass} value={script[key]} onChange={e => updateScript(key, e.target.value)} />}</label>)}</div>
       <button className={`${buttonClass} mt-3`} disabled={busy} onClick={downloadScript}>Télécharger le script .ps1</button>
     </Card>
