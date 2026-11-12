@@ -7,12 +7,23 @@ import {Simulate} from 'react-dom/test-utils';
 import {JSDOM} from 'jsdom';
 import {build} from 'esbuild';
 import {unlink, readFile} from 'node:fs/promises';
+import JSZip from 'jszip';
+const realGenerateZip = JSZip.prototype.generateAsync;
+JSZip.prototype.generateAsync = function(...args) {
+  const gate = globalThis.__bundleGate;
+  const task = realGenerateZip.apply(this,args).then(async bytes => {
+    if(gate){globalThis.__bundleReady=true;await gate;}
+    return bytes;
+  });
+  (globalThis.__bundleTasks ||= []).push(task);
+  return task;
+};
 
 const outfile = new URL('./.workstation-ui-test.mjs', import.meta.url).pathname;
 await build({entryPoints:[new URL('./WorkstationProcedures.tsx', import.meta.url).pathname], outfile, bundle:true, format:'esm', platform:'node', packages:'external', jsx:'automatic', plugins:[{name:'auth-and-script',setup(p){
   p.onResolve({filter:/context\/AuthContext$/},()=>({path:'auth',namespace:'fixture'}));
   p.onLoad({filter:/./,namespace:'fixture'},()=>({contents:'export const useAuth = () => ({user: globalThis.__workstationAuth ? globalThis.__workstationAuth.user : {id:globalThis.__workstationUserId||1,role:globalThis.__workstationRole||"admin"}, verified:globalThis.__workstationAuth?.verified ?? true, loading:globalThis.__workstationAuth?.loading ?? false, verificationEpoch:globalThis.__workstationAuth?.epoch ?? 0, onVerificationStart:globalThis.__workstationAuth?.subscribe ?? (()=>()=>{})})',loader:'js'}));
-  p.onResolve({filter:/workstationAuditScript$/},()=>({path:'script',namespace:'script-fixture'}));
+  p.onResolve({filter:/workstationAuditScript$/},args=>args.importer.endsWith('workstationAuditBundle.ts')?undefined:({path:'script',namespace:'script-fixture'}));
   p.onLoad({filter:/./,namespace:'script-fixture'},()=>({contents:'export const DEFAULT_WORKSTATION_AUDIT_OPTIONS={clientName:"BZ",computerPrefix:"PC-",adminLocal:"bzinc",keyboards:["fr-CA"],printerName:"",apps:[]};export const generateWorkstationAuditScript = config => { globalThis.__scriptConfig = config; return "# Test PS1"; };',loader:'js'}));
 }}]});
 const Page = (await import(outfile)).default;
@@ -20,6 +31,7 @@ await unlink(outfile);
 const template = {id:3,clientId:2,name:'Standard Windows',version:1,sections:[{title:'Préparation',steps:[{id:'s1',title:'Clavier',note:'Vérifier FR'}]}]};
 const dossier = {id:11,clientId:2,clientName:'Acme TI',templateId:3,employee:'Alice',computer:'PC-1',ticket:'T-1',date:'2026-11-09',version:1,archivedAt:null,sections:[{title:'Préparation',steps:[{id:'s1',title:'Clavier',note:'Vérifier FR',etat:'todo',commentaire:''}]}]};
 function fixture({dossiers=[],templates=[template],putStatus=200,browserRouter=false,override,pendingSeed}={}) {
+  globalThis.__bundleTasks=[];delete globalThis.__bundleReady;
   const dom = new JSDOM('<!doctype html><div id="app"></div>',{url:browserRouter?'http://localhost/procedures/installation-postes':'http://localhost/'});
   dom.window.URL.revokeObjectURL=()=>{};
   const old={window:globalThis.window,document:globalThis.document,fetch:globalThis.fetch,Blob:globalThis.Blob,URL:globalThis.URL};
@@ -52,9 +64,9 @@ function fixture({dossiers=[],templates=[template],putStatus=200,browserRouter=f
   const root=createRoot(dom.window.document.getElementById('app'));
   const render=async()=>{await act(async()=>root.render(browserRouter?React.createElement(BrowserRouter,{future:{v7_startTransition:true,v7_relativeSplatPath:true}},React.createElement('nav',null,React.createElement(Link,{to:'/clients'},'Clients')),React.createElement(Routes,null,React.createElement(Route,{path:'/procedures/installation-postes',element:React.createElement(Page)}),React.createElement(Route,{path:'/clients',element:React.createElement('p',null,'Page clients')}))):React.createElement(Page)));};
   const input=async(label,value)=>{const el=[...dom.window.document.querySelectorAll('input,textarea,select')].find(e=>e.getAttribute('aria-label')===label);assert.ok(el,`Missing input ${label}`);await act(async()=>{const proto=el.tagName==='TEXTAREA'?dom.window.HTMLTextAreaElement.prototype:el.tagName==='SELECT'?dom.window.HTMLSelectElement.prototype:dom.window.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,value);el.dispatchEvent(new dom.window.Event('input',{bubbles:true}));el.dispatchEvent(new dom.window.Event('change',{bubbles:true}));Simulate.change(el,{target:{value}});});};
-  const click=async(text)=>{const el=[...dom.window.document.querySelectorAll('button')].find(e=>e.textContent.trim().startsWith(text));assert.ok(el,`Missing button ${text}`);await act(async()=>el.click());};
+  const click=async(text)=>{const el=[...dom.window.document.querySelectorAll('button')].find(e=>e.textContent.trim().startsWith(text));assert.ok(el,`Missing button ${text}`);await act(async()=>{el.click();await new Promise(r=>setImmediate(r));await Promise.all(globalThis.__bundleTasks||[]);});};
   const cleanup=async()=>{await act(async()=>root.unmount());delete globalThis.__workstationAuth;Object.assign(globalThis,old);dom.window.close();};
-  return {dom,requests,render,input,click,cleanup,auth};
+  return {dom,requests,render,input,click,cleanup,auth,unmount:async()=>{await act(async()=>root.unmount());}};
 }
 
 test('client procedure drives both exports even with an unrelated historical dossier open',async()=>{
@@ -63,12 +75,33 @@ test('client procedure drives both exports even with an unrelated historical dos
   let blob;const oldCreate=URL.createObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};f.dom.window.HTMLAnchorElement.prototype.click=function(){};
   try{await f.render();f.dom.window.confirm=()=>true;await f.input('Client','2');await f.input('Modèle','7');await f.click('Ouvrir Alice · Acme TI');
     await f.click('Télécharger la procédure HTML');assert.ok(blob);const html=await new Promise(resolve=>{const r=new f.dom.window.FileReader();r.onload=()=>resolve(r.result);r.readAsText(blob);});assert.match(html,/CLIENT-GENERAL/);assert.doesNotMatch(html,/Alice|PC-1|T-1/);
-    await f.click('Télécharger le script .ps1');assert.equal(globalThis.__scriptConfig.procedure.name,saved.name);assert.deepEqual(globalThis.__scriptConfig.procedure.sections,saved.sections);
+    await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(globalThis.__scriptConfig.procedure.name,saved.name);assert.deepEqual(globalThis.__scriptConfig.procedure.sections,saved.sections);
     assert.equal(f.requests.filter(r=>r.url.includes('/audit-source?clientId=2&templateId=7')).length,2);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source/dossier/')));assert.ok(!f.requests.some(r=>r.method!=='GET'));
     assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'7');
     assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]').disabled,true);
     assert.doesNotMatch(f.dom.window.document.body.textContent,/Créer le dossier|Nouveau dossier/);
   }finally{URL.createObjectURL=oldCreate;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}
+});
+
+test('explicit client save prepares a selected-client copy for review without writing the global',async()=>{
+ const f=fixture();try{await f.render();await f.input('Client','2');await f.click('Gabarit Windows · Global');await f.click('Enregistrer pour ce client');
+ assert.equal(f.dom.window.document.querySelector('[aria-label="Client du modèle"]').value,'2');
+ assert.match(f.dom.window.document.body.textContent,/Destinataire : Acme TI/);
+ assert.ok(!f.requests.some(r=>r.method!=='GET'),'copy is a draft until reviewed');
+ await f.input('Note étape 1.1','Note client validée');await f.click('Enregistrer pour ce client');
+ const post=f.requests.find(r=>r.method==='POST');assert.equal(post.body.clientId,2);assert.equal(post.body.sections[0].steps[0].note,'Note client validée');
+ assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'9');assert.match(f.dom.window.document.body.textContent,/Procédure enregistrée pour Acme TI/);
+ assert.ok(!f.requests.some(r=>r.method==='PUT'));
+ }finally{await f.cleanup();}
+});
+
+test('duplication prefills selected client and refused A-to-B navigation keeps reviewed draft',async()=>{
+ const f=fixture();try{await f.render();await f.input('Client','2');await f.click('Dupliquer pour un client');
+ assert.equal(f.dom.window.document.querySelector('[aria-label="Client du modèle"]').value,'2');
+ await f.input('Note étape 1.1','KEEP-CLIENT-DRAFT');f.dom.window.confirm=()=>false;await f.input('Client','');
+ assert.equal(f.dom.window.document.querySelector('[aria-label="Client"]').value,'2');
+ assert.equal(f.dom.window.document.querySelector('[aria-label="Note étape 1.1"]').value,'KEEP-CLIENT-DRAFT');assert.ok(!f.requests.some(r=>r.method!=='GET'));
+ }finally{await f.cleanup();}
 });
 
 test('Prime tools exposes the workstation editor route',async()=>{
@@ -100,11 +133,11 @@ test('print view hides the app shell and keeps the dossier readable',async()=>{c
 
 test('printer motif label warns that an empty value requires verification, not any printer',async()=>{const f=fixture();try{await f.render();const label=f.dom.window.document.querySelector('input[aria-label="Motif de l’imprimante"]')?.closest('label')?.textContent||'';assert.match(label,/vide = à vérifier/i);assert.doesNotMatch(label,/vide = toute imprimante/i);}finally{await f.cleanup();}});
 
-test('audit download requires a client and its selected procedure',async()=>{const f=fixture();const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.click('Télécharger le script .ps1');assert.equal(downloads,0);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));assert.match(f.dom.window.document.body.textContent,/Choisissez.*client.*modèle/i);}finally{URL.createObjectURL=oldCreate;await f.cleanup();}});
+test('audit download requires a client and its selected procedure',async()=>{const f=fixture();const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(downloads,0);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));assert.match(f.dom.window.document.body.textContent,/Choisissez.*client.*modèle/i);}finally{URL.createObjectURL=oldCreate;await f.cleanup();}});
 
-test('audit uses an authoritative selected client and template instead of generic BZ defaults',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));assert.equal(globalThis.__scriptConfig.clientName,'Acme TI');assert.equal(globalThis.__scriptConfig.procedure.name,'Standard Windows');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,template.sections);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
+test('audit uses an authoritative selected client and template instead of generic BZ defaults',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la trousse d’audit (.zip)');assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));assert.equal(globalThis.__scriptConfig.clientName,'Acme TI');assert.equal(globalThis.__scriptConfig.procedure.name,'Standard Windows');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,template.sections);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
 
-test('denied or malformed audit source never falls back to a generic client script',async()=>{for(const answer of [Response.json({error:'Introuvable'},{status:404}),Response.json({client:{id:4,nom:'Autre client'},template})]){const f=fixture({override:({url})=>url.includes('/audit-source?')?answer:undefined});const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.equal(downloads,0);assert.ok(f.dom.window.document.querySelector('[role="alert"]'));}finally{URL.createObjectURL=oldCreate;await f.cleanup();}}});
+test('denied or malformed audit source never falls back to a generic client script',async()=>{for(const answer of [Response.json({error:'Introuvable'},{status:404}),Response.json({client:{id:4,nom:'Autre client'},template})]){const f=fixture({override:({url})=>url.includes('/audit-source?')?answer:undefined});const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(downloads,0);assert.ok(f.dom.window.document.querySelector('[role="alert"]'));}finally{URL.createObjectURL=oldCreate;await f.cleanup();}}});
 
 test('changing the creation model while audit-source is pending never downloads the old script',async()=>{
   let release;const gate=new Promise(resolve=>{release=resolve;});
@@ -113,11 +146,11 @@ test('changing the creation model while audit-source is pending never downloads 
   const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
   try{
     await f.render();await f.input('Client','2');await f.input('Modèle','3');
-    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger le script .ps1').click());
+    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la trousse d’audit (.zip)').click());
     assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));
     await f.input('Modèle','8');await act(async()=>release());
     assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'8');
-    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Script généré/);
+    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Trousse ZIP générée/);
   }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
 });
 
@@ -127,11 +160,11 @@ test('changing the creation client while audit-source is pending never downloads
   const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
   try{
     await f.render();await f.input('Client','2');await f.input('Modèle','3');
-    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger le script .ps1').click());
+    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la trousse d’audit (.zip)').click());
     assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));
     await f.input('Client','');await act(async()=>release());
     assert.equal(f.dom.window.document.querySelector('[aria-label="Client"]').value,'');
-    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Script généré/);
+    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Trousse ZIP générée/);
   }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
 });
 
@@ -141,11 +174,11 @@ test('changing generator prefix during audit-source fetch preserves the edit and
   const oldCreate=URL.createObjectURL;let downloads=0;URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};
   try{
     await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Préfixe du client','OLD-');
-    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger le script .ps1').click());
+    await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la trousse d’audit (.zip)').click());
     assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));
     await f.input('Préfixe du client','NEW-');await act(async()=>release());
     assert.equal(f.dom.window.document.querySelector('[aria-label="Préfixe du client"]').value,'NEW-');
-    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Script généré/);
+    assert.equal(downloads,0);assert.doesNotMatch(f.dom.window.document.body.textContent,/Trousse ZIP générée/);
   }finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}
 });
 
@@ -156,21 +189,21 @@ test('unsaved procedure-model edits block audit export without discarding edits'
     await f.render();await f.input('Client','2');await f.input('Modèle','3');
     f.dom.window.confirm=()=>true;
     await f.click('Gabarit Windows · Global');await f.input('Titre étape 1.1','Clavier modifié non sauvegardé');
-    await f.click('Télécharger le script .ps1');
+    await f.click('Télécharger la trousse d’audit (.zip)');
     assert.equal(downloads,0);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));
     assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Sauvegardez.*modèle.*(annulez|rouvr)/i);
     assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'Clavier modifié non sauvegardé');
-    assert.equal([...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Sauvegarder le modèle').disabled,false);
+    assert.equal([...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Sauvegarder le gabarit global').disabled,false);
   }finally{URL.createObjectURL=oldCreate;await f.cleanup();}
 });
 
-test('script panel passes client-specific audit settings to generator',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};const oldClick=f.dom.window.HTMLAnchorElement.prototype.click;f.dom.window.HTMLAnchorElement.prototype.click=function(){globalThis.__downloadName=this.download;};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Préfixe du client','ACME-');await f.input('Compte administrateur','local-admin');await f.input('Clavier attendu','fr-CA, en-US');await f.input('Motif de l’imprimante','Bureau');await f.input('Applications attendues','Office\nChrome');await f.click('Télécharger le script .ps1');assert.equal(globalThis.__scriptConfig.clientName,'Acme TI');assert.equal(globalThis.__scriptConfig.computerPrefix,'ACME-');assert.equal(globalThis.__scriptConfig.adminLocal,'local-admin');assert.deepEqual(globalThis.__scriptConfig.keyboards,['fr-CA','en-US']);assert.equal(globalThis.__scriptConfig.printerName,'Bureau');assert.deepEqual(globalThis.__scriptConfig.apps,['Office','Chrome']);assert.deepEqual(globalThis.__scriptConfig.procedure.sections,template.sections);assert.equal(globalThis.__downloadName,'Acme-TI-Standard-Windows-2-3.ps1');}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
+test('script panel passes client-specific audit settings to generator',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL;URL.createObjectURL=()=> 'blob:fixture';URL.revokeObjectURL=()=>{};const oldClick=f.dom.window.HTMLAnchorElement.prototype.click;f.dom.window.HTMLAnchorElement.prototype.click=function(){globalThis.__downloadName=this.download;};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Préfixe du client','ACME-');await f.input('Compte administrateur','local-admin');await f.input('Clavier attendu','fr-CA, en-US');await f.input('Motif de l’imprimante','Bureau');await f.input('Applications attendues','Office\nChrome');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(globalThis.__scriptConfig.clientName,'Acme TI');assert.equal(globalThis.__scriptConfig.computerPrefix,'ACME-');assert.equal(globalThis.__scriptConfig.adminLocal,'local-admin');assert.deepEqual(globalThis.__scriptConfig.keyboards,['fr-CA','en-US']);assert.equal(globalThis.__scriptConfig.printerName,'Bureau');assert.deepEqual(globalThis.__scriptConfig.apps,['Office','Chrome']);assert.deepEqual(globalThis.__scriptConfig.procedure.sections,template.sections);assert.equal(globalThis.__downloadName,'audit-client-2-procedure-3.zip');}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
 
-test('Prime cannot edit global template but can create a client-scoped model',async()=>{globalThis.__workstationRole='user';const f=fixture();try{await f.render();assert.ok(![...f.dom.window.document.querySelectorAll('button')].some(b=>b.textContent.includes('Gabarit Windows · Global')));await f.input('Client','2');await f.click('Nouvelle procédure client');const scope=f.dom.window.document.querySelector('[aria-label="Client du modèle"]');assert.ok(scope);assert.ok(![...scope.options].some(o=>o.value===''));await f.input('Client du modèle','2');await f.input('Nom du modèle','Client Windows');await f.click('Ajouter une section');await f.input('Titre de section 1','Installation');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','Imprimante');await f.click('Sauvegarder le modèle');assert.equal(f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/templates')).body.clientId,2);}finally{globalThis.__workstationRole='admin';await f.cleanup();}});
+test('Prime cannot edit global template but can create a client-scoped model',async()=>{globalThis.__workstationRole='user';const f=fixture();try{await f.render();assert.ok(![...f.dom.window.document.querySelectorAll('button')].some(b=>b.textContent.includes('Gabarit Windows · Global')));await f.input('Client','2');await f.click('Nouvelle procédure client');const scope=f.dom.window.document.querySelector('[aria-label="Client du modèle"]');assert.ok(scope);assert.ok(![...scope.options].some(o=>o.value===''));await f.input('Client du modèle','2');await f.input('Nom du modèle','Client Windows');await f.click('Ajouter une section');await f.input('Titre de section 1','Installation');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','Imprimante');await f.click('Enregistrer pour ce client');assert.equal(f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/templates')).body.clientId,2);}finally{globalThis.__workstationRole='admin';await f.cleanup();}});
 
-test('Prime duplicates the global standard into an explicitly selected TI client without changing the source',async()=>{globalThis.__workstationRole='user';const f=fixture();try{await f.render();assert.ok(![...f.dom.window.document.querySelectorAll('button')].some(b=>b.textContent.includes('Gabarit Windows · Global')));await f.click('Dupliquer pour un client');assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Gabarit Windows');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre de section 1"]').value,'Préparation');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'Clavier');const save=[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Sauvegarder le modèle');assert.equal(save.disabled,true);await f.input('Client du modèle','2');await f.input('Titre étape 1.1','Clavier client');await f.click('Sauvegarder le modèle');const post=f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/templates'));assert.equal(post.body.clientId,2);assert.equal(post.body.sections[0].steps[0].title,'Clavier client');assert.equal(template.sections[0].steps[0].title,'Clavier');assert.ok(!f.requests.some(r=>r.method==='PUT'&&r.url.endsWith('/templates/3')));}finally{globalThis.__workstationRole='admin';await f.cleanup();}});
+test('Prime duplicates the global standard into an explicitly selected TI client without changing the source',async()=>{globalThis.__workstationRole='user';const f=fixture();try{await f.render();assert.ok(![...f.dom.window.document.querySelectorAll('button')].some(b=>b.textContent.includes('Gabarit Windows · Global')));await f.click('Dupliquer pour un client');assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Gabarit Windows');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre de section 1"]').value,'Préparation');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'Clavier');const save=[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Enregistrer pour ce client');assert.equal(save.disabled,true);await f.input('Client du modèle','2');await f.input('Titre étape 1.1','Clavier client');await f.click('Enregistrer pour ce client');const post=f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/templates'));assert.equal(post.body.clientId,2);assert.equal(post.body.sections[0].steps[0].title,'Clavier client');assert.equal(template.sections[0].steps[0].title,'Clavier');assert.ok(!f.requests.some(r=>r.method==='PUT'&&r.url.endsWith('/templates/3')));}finally{globalThis.__workstationRole='admin';await f.cleanup();}});
 
-test('script download link is not canceled by the page navigation guard while export is busy',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blocked;URL.createObjectURL=()=> 'blob:http://localhost/fixture';f.dom.window.HTMLAnchorElement.prototype.click=function(){this.addEventListener('click',e=>{blocked=e.defaultPrevented;e.preventDefault();},{once:true});this.dispatchEvent(new f.dom.window.MouseEvent('click',{bubbles:true,cancelable:true}));};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.equal(blocked,false,'download anchor must reach Chrome without preventDefault');}finally{URL.createObjectURL=oldCreate;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}});
+test('script download link is not canceled by the page navigation guard while export is busy',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blocked;URL.createObjectURL=()=> 'blob:http://localhost/fixture';f.dom.window.HTMLAnchorElement.prototype.click=function(){this.addEventListener('click',e=>{blocked=e.defaultPrevented;e.preventDefault();},{once:true});this.dispatchEvent(new f.dom.window.MouseEvent('click',{bubbles:true,cancelable:true}));};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(blocked,false,'download anchor must reach Chrome without preventDefault');}finally{URL.createObjectURL=oldCreate;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}});
 
 test('downloads a self-contained HTML procedure from the authorized client model',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob,filename;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){filename=this.download;};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la procédure HTML');assert.ok(f.requests.some(r=>r.url.includes('/audit-source?clientId=2&templateId=3')));assert.equal(filename,'Acme-TI-Standard-Windows-2-3.html');assert.ok(blob,'HTML file should be created');const html=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error);reader.readAsText(blob);});assert.match(html,/<!doctype html>/i);assert.match(html,/Standard Windows/);assert.match(html,/Acme TI/);assert.match(html,/Clavier/);assert.match(html,/Vérifier FR/);}finally{URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}});
 
@@ -182,7 +215,7 @@ test('denied HTML template source never falls back to a listed model or creates 
 });
 
 test('HTML and PS1 refuse a server-changed selected template and ask to reload',async()=>{
-  for(const format of ['Télécharger la procédure HTML','Télécharger le script .ps1'])for(const changed of [
+  for(const format of ['Télécharger la procédure HTML','Télécharger la trousse d’audit (.zip)'])for(const changed of [
     {...template,version:2},{...template,name:'Modèle modifié'},
     {...template,clientId:null},{...template,sections:[{title:'Nouvelle section',steps:[]}]}
   ]){
@@ -194,7 +227,7 @@ test('HTML and PS1 refuse a server-changed selected template and ask to reload',
 });
 
 test('verification-start synchronously cancels deferred HTML and PS1 exports, even after same-account re-arm',async()=>{
-  for(const format of ['Télécharger la procédure HTML','Télécharger le script .ps1'])for(const useDossier of [false,true]){
+  for(const format of ['Télécharger la procédure HTML','Télécharger la trousse d’audit (.zip)'])for(const useDossier of [false,true]){
     let release;const gate=new Promise(resolve=>{release=resolve;});
     const f=fixture({dossiers:useDossier?[dossier]:[],override:({url})=>url.includes('/audit-source')?gate.then(()=>url.includes('/dossier/')?Response.json({dossier}):Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
     const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};
@@ -213,7 +246,7 @@ test('verification-start synchronously cancels deferred HTML and PS1 exports, ev
 });
 
 test('an old deferred response cannot download after same-account revalidation re-arms a newer export',async()=>{
-  for(const format of ['Télécharger la procédure HTML','Télécharger le script .ps1']){
+  for(const format of ['Télécharger la procédure HTML','Télécharger la trousse d’audit (.zip)']){
     let releaseOld,reads=0;const oldGate=new Promise(resolve=>{releaseOld=resolve;});
     const f=fixture({override:({url})=>url.includes('/audit-source?')?(++reads===1?oldGate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});
     const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blobs=0;
@@ -240,15 +273,15 @@ test('account switch or logout invalidates an in-flight HTML export before its r
 
 test('changing model while the HTML source is pending cancels the old export',async()=>{let release;const gate=new Promise(resolve=>{release=resolve;});const alternate={...template,id:8,name:'Autre modèle'};const f=fixture({templates:[template,alternate],override:({url})=>url.includes('/audit-source?')?gate.then(()=>Response.json({client:{id:2,nom:'Acme TI'},template})):undefined});const oldCreate=URL.createObjectURL;let blobs=0;URL.createObjectURL=()=>{blobs++;return 'blob:fixture';};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la procédure HTML').click());await f.input('Modèle','8');await act(async()=>release());assert.equal(blobs,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'8');}finally{release();URL.createObjectURL=oldCreate;await f.cleanup();}});
 
-test('PowerShell download starts with a UTF-8 BOM before script text',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');assert.ok(blob);const bytes=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(new Uint8Array(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsArrayBuffer(blob);});assert.deepEqual([...bytes].slice(0,6),[0xef,0xbb,0xbf,0x23,0x20,0x54]);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
+test('PowerShell download starts with a UTF-8 BOM before script text',async()=>{const f=fixture();const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let blob;URL.createObjectURL=value=>{blob=value;return 'blob:fixture';};URL.revokeObjectURL=()=>{};f.dom.window.HTMLAnchorElement.prototype.click=function(){};try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la trousse d’audit (.zip)');assert.ok(blob);const bytes=await new Promise((resolve,reject)=>{const reader=new f.dom.window.FileReader();reader.onload=()=>resolve(new Uint8Array(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsArrayBuffer(blob);});const archive=await JSZip.loadAsync(bytes,{checkCRC32:true});assert.equal(blob.type,'application/zip');assert.equal(Object.keys(archive.files).length,2);const ps=await archive.file('audit-client-2-procedure-3.ps1').async('uint8array');assert.deepEqual([...ps].slice(0,6),[0xef,0xbb,0xbf,0x23,0x20,0x54]);const cmd=await archive.file('lancer-audit-client-2-procedure-3.cmd').async('string');assert.match(cmd,/%~dp0audit-client-2-procedure-3\.ps1/);}finally{f.dom.window.HTMLAnchorElement.prototype.click=oldClick;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;await f.cleanup();}});
 
-test('template editor can add a section and a step then save',async()=>{const f=fixture();try{await f.render();await f.input('Client','2');await f.click('Nouvelle procédure client');await f.input('Nom du modèle','Client Windows');await f.input('Client du modèle','2');await f.click('Ajouter une section');await f.input('Titre de section 1','Installation');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','Imprimante');await f.click('Sauvegarder le modèle');const post=f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/templates'));assert.equal(post.body.sections[0].steps[0].title,'Imprimante');assert.equal(post.body.clientId,2);}finally{await f.cleanup();}});
+test('template editor can add a section and a step then save',async()=>{const f=fixture();try{await f.render();await f.input('Client','2');await f.click('Nouvelle procédure client');await f.input('Nom du modèle','Client Windows');await f.input('Client du modèle','2');await f.click('Ajouter une section');await f.input('Titre de section 1','Installation');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','Imprimante');await f.click('Enregistrer pour ce client');const post=f.requests.find(r=>r.method==='POST'&&r.url.endsWith('/templates'));assert.equal(post.body.sections[0].steps[0].title,'Imprimante');assert.equal(post.body.clientId,2);}finally{await f.cleanup();}});
 
 test('cursor controls load next pages and independent standard is deduped',async()=>{const second={...template,id:8,name:'Autre modèle'};const extra={...dossier,id:10,employee:'Bob'};const f=fixture({templates:[],override:({url})=>{if(url==='/api/workstation-procedures/templates')return Response.json({templates:[template],hasMore:true,nextBefore:3});if(url.endsWith('/templates?before=3'))return Response.json({templates:[second],hasMore:false,nextBefore:null});if(url==='/api/workstation-procedures/dossiers')return Response.json({dossiers:[dossier],hasMore:true,nextBefore:11});if(url.endsWith('/dossiers?before=11'))return Response.json({dossiers:[extra],hasMore:false,nextBefore:null});}});try{await f.render();assert.equal(f.dom.window.document.body.textContent.split('Dupliquer pour un client · Gabarit Windows').length-1,1);await f.click('Charger plus de modèles');await f.click('Charger plus de dossiers');assert.match(f.dom.window.document.body.textContent,/Autre modèle/);assert.match(f.dom.window.document.body.textContent,/Ouvrir Bob/);assert.ok(!f.dom.window.document.body.textContent.includes('Charger plus de modèles'));}finally{await f.cleanup();}});
 
 test('standard template remains available when paged template listing fails',async()=>{const f=fixture({override:({url})=>url==='/api/workstation-procedures/templates'?Response.json({error:'Unavailable'},{status:503}):undefined});try{await f.render();assert.match(f.dom.window.document.body.textContent,/Gabarit Windows/);assert.match(f.dom.window.document.body.textContent,/Unavailable/);}finally{await f.cleanup();}});
 
-test('400 invalid template keeps editable model and permits corrected retry with a new UUID',async()=>{const f=fixture({override:({url,method,body})=>url.endsWith('/templates')&&method==='POST'&&body.name.length>250?Response.json({error:'Nom invalide'},{status:400}):undefined});try{await f.render();await f.input('Client','2');await f.click('Nouvelle procédure client');await f.input('Client du modèle','2');await f.input('Nom du modèle','X'.repeat(251));await f.click('Ajouter une section');await f.input('Titre de section 1','Installation');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','Imprimante');await f.click('Sauvegarder le modèle');assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Nom invalide/);assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'X'.repeat(251));assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'Imprimante');await f.input('Nom du modèle','Client Windows');await f.click('Sauvegarder le modèle');const posts=f.requests.filter(r=>r.method==='POST'&&r.url.endsWith('/templates'));assert.equal(posts.length,2);assert.notEqual(posts[0].body.requestKey,posts[1].body.requestKey);assert.match(f.dom.window.document.body.textContent,/Modèle sauvegardé/);}finally{await f.cleanup();}});
+test('400 invalid template keeps editable model and permits corrected retry with a new UUID',async()=>{const f=fixture({override:({url,method,body})=>url.endsWith('/templates')&&method==='POST'&&body.name.length>250?Response.json({error:'Nom invalide'},{status:400}):undefined});try{await f.render();await f.input('Client','2');await f.click('Nouvelle procédure client');await f.input('Client du modèle','2');await f.input('Nom du modèle','X'.repeat(251));await f.click('Ajouter une section');await f.input('Titre de section 1','Installation');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','Imprimante');await f.click('Enregistrer pour ce client');assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Nom invalide/);assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'X'.repeat(251));assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'Imprimante');await f.input('Nom du modèle','Client Windows');await f.click('Enregistrer pour ce client');const posts=f.requests.filter(r=>r.method==='POST'&&r.url.endsWith('/templates'));assert.equal(posts.length,2);assert.notEqual(posts[0].body.requestKey,posts[1].body.requestKey);assert.match(f.dom.window.document.body.textContent,/Procédure enregistrée pour Acme TI/);}finally{await f.cleanup();}});
 
 test('delayed pending template readback preserves an edited model and its save action',async()=>{
   const seed={kind:'template',payload:{requestKey:'9ecb3330-166b-4c93-9cd8-fce998336399',clientId:2,name:'New model',sections:template.sections}};
@@ -258,10 +291,10 @@ test('delayed pending template readback preserves an edited model and its save a
     await f.render();await f.click('Gabarit Windows · Global');await f.input('Nom du modèle','Important unsaved edit');
     await act(async()=>release());
     assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]')?.value,'Important unsaved edit');
-    assert.equal([...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Sauvegarder le modèle')?.disabled,false);
+    assert.equal([...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Sauvegarder le gabarit global')?.disabled,false);
     assert.match(f.dom.window.document.body.textContent,/New model/);
     assert.equal(f.dom.window.sessionStorage.length,0);
-    await f.click('Sauvegarder le modèle');assert.equal(f.requests.find(r=>r.method==='PUT')?.body.name,'Important unsaved edit');
+    await f.click('Sauvegarder le gabarit global');assert.equal(f.requests.find(r=>r.method==='PUT')?.body.name,'Important unsaved edit');
   }finally{release();await f.cleanup();}
 });
 
@@ -288,7 +321,7 @@ const clientOverride=({url})=>url==='/api/clients'?Response.json({clients:[{id:2
 
 test('selection changes clear the previous client/procedure export success without generating another file',async()=>{
  const items=[template,variant,otherProcedure];
- for(const format of ['Télécharger la procédure HTML','Télécharger le script .ps1'])for(const change of [
+ for(const format of ['Télécharger la procédure HTML','Télécharger la trousse d’audit (.zip)'])for(const change of [
   f=>f.input('Client','7'), f=>f.input('Modèle','8'),
   f=>f.click('Variante Acme'), f=>f.click('Gabarit Windows · Global'),
   f=>f.click('Dupliquer pour un client'), f=>f.click('Nouvelle procédure client'),
@@ -313,15 +346,15 @@ test('export A then client B then variant A shows only the current source and cl
  const f=fixture({templates:items,override:args=>clientOverride(args)??(args.url.includes('/audit-source?')?Response.json({client:args.url.includes('clientId=7&')?{id:7,nom:'Acme TÍ'}:{id:2,nom:'Acme TI'},template:items.find(i=>args.url.endsWith(`templateId=${i.id}`))}):undefined)});
  const statuses=()=>[...f.dom.window.document.querySelectorAll('[role="status"]')].map(e=>e.textContent).join(' / ');
  try{await f.render();await captureDownloads(f,async({names})=>{
-  await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger le script .ps1');
-  assert.match(statuses(),/Script généré pour Acme TI selon Standard Windows/);
+  await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la trousse d’audit (.zip)');
+  assert.match(statuses(),/Trousse ZIP générée pour Acme TI selon Standard Windows/);
   await f.input('Client','7');await f.input('Modèle','9');
-  assert.doesNotMatch(statuses(),/Script généré pour Acme TI/);assert.match(statuses(),/Source : procédure enregistrée Standard Windows du client Acme TÍ/);
-  await f.click('Télécharger le script .ps1');assert.match(statuses(),/Script généré pour Acme TÍ/);
+  assert.doesNotMatch(statuses(),/Trousse ZIP générée pour Acme TI/);assert.match(statuses(),/Source : procédure enregistrée Standard Windows du client Acme TÍ/);
+  await f.click('Télécharger la trousse d’audit (.zip)');assert.match(statuses(),/Trousse ZIP générée pour Acme TÍ/);
   await f.input('Client','2');await f.input('Modèle','8');
-  assert.doesNotMatch(statuses(),/Script généré|Acme TÍ/);assert.match(statuses(),/Source : procédure enregistrée Variante Acme du client Acme TI/);
-  await f.click('Télécharger le script .ps1');assert.match(statuses(),/Script généré pour Acme TI selon Variante Acme/);
-  await f.input('Modèle','');await f.click('Télécharger le script .ps1');
+  assert.doesNotMatch(statuses(),/Trousse ZIP générée|Acme TÍ/);assert.match(statuses(),/Source : procédure enregistrée Variante Acme du client Acme TI/);
+  await f.click('Télécharger la trousse d’audit (.zip)');assert.match(statuses(),/Trousse ZIP générée pour Acme TI selon Variante Acme/);
+  await f.input('Modèle','');await f.click('Télécharger la trousse d’audit (.zip)');
   assert.match(f.dom.window.document.querySelector('[role="alert"]')?.textContent??'',/Choisissez/);
   await f.input('Modèle','3');assert.ok(!f.dom.window.document.querySelector('[role="alert"]'));
   assert.equal(names.length,3);
@@ -343,21 +376,21 @@ test('procedures are grouped by real client; variants survive and foreign portfo
 test('client settings reset rather than silently carrying to another client; each client and variant exports its own saved source',async()=>{
  const items=[template,variant,otherProcedure];const f=fixture({templates:items,override:args=>clientOverride(args)??(args.url.includes('/audit-source?')?Response.json({client:args.url.includes('clientId=7&')?{id:7,nom:'Acme TÍ'}:{id:2,nom:'Acme TI'},template:items.find(i=>args.url.endsWith(`templateId=${i.id}`))}):undefined)});
  try{await f.render();await captureDownloads(f,async({blobs,names,read})=>{
- await f.input('Client','2');await f.input('Modèle','3');await f.input('Préfixe du client','ACME-ONLY-');await f.click('Télécharger la procédure HTML');await f.click('Télécharger le script .ps1');assert.equal(globalThis.__scriptConfig.computerPrefix,'ACME-ONLY-');
- await f.input('Modèle','8');await f.click('Télécharger la procédure HTML');await f.click('Télécharger le script .ps1');assert.equal(globalThis.__scriptConfig.procedure.name,variant.name);assert.match(await read(blobs[2]),/VARIANT-ONLY/);
- await f.input('Client','7');assert.equal(f.dom.window.document.querySelector('[aria-label="Préfixe du client"]').value,'PC-');await f.input('Modèle','9');await f.click('Télécharger la procédure HTML');await f.click('Télécharger le script .ps1');assert.equal(globalThis.__scriptConfig.clientName,'Acme TÍ');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,otherProcedure.sections);assert.match(await read(blobs[4]),/OTHER-CLIENT-ONLY/);assert.doesNotMatch(await read(blobs[4]),/VARIANT-ONLY/);assert.equal(names.length,6);assert.equal(new Set(names).size,6);assert.ok(names.every(n=>/^[a-zA-Z0-9-]+\.(html|ps1)$/.test(n)));
+ await f.input('Client','2');await f.input('Modèle','3');await f.input('Préfixe du client','ACME-ONLY-');await f.click('Télécharger la procédure HTML');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(globalThis.__scriptConfig.computerPrefix,'ACME-ONLY-');
+ await f.input('Modèle','8');await f.click('Télécharger la procédure HTML');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(globalThis.__scriptConfig.procedure.name,variant.name);assert.match(await read(blobs[2]),/VARIANT-ONLY/);
+ await f.input('Client','7');assert.equal(f.dom.window.document.querySelector('[aria-label="Préfixe du client"]').value,'PC-');await f.input('Modèle','9');await f.click('Télécharger la procédure HTML');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(globalThis.__scriptConfig.clientName,'Acme TÍ');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,otherProcedure.sections);assert.match(await read(blobs[4]),/OTHER-CLIENT-ONLY/);assert.doesNotMatch(await read(blobs[4]),/VARIANT-ONLY/);assert.equal(names.length,6);assert.equal(new Set(names).size,6);assert.ok(names.every(n=>/^[a-zA-Z0-9-]+\.(html|zip)$/.test(n)));
  });}finally{await f.cleanup();}
 });
 
 test('global template cannot export as a fake client procedure until duplicated and confirmed by readback',async()=>{
  const global={...template,clientId:null};const f=fixture({templates:[global],override:({url})=>url.includes('/audit-source?')?Response.json({client:{id:2,nom:'Acme TI'},template:global}):undefined});
- try{await f.render();await captureDownloads(f,async({blobs})=>{await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la procédure HTML');await f.click('Télécharger le script .ps1');assert.equal(blobs.length,0);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));});}finally{await f.cleanup();}
+ try{await f.render();await captureDownloads(f,async({blobs})=>{await f.input('Client','2');await f.input('Modèle','3');await f.click('Télécharger la procédure HTML');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(blobs.length,0);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source?')));});}finally{await f.cleanup();}
 });
 
 test('new client procedure saves through templates, reads its receipt, and exports after authoritative source recheck without any dossier POST',async()=>{
  let stored;const f=fixture({override:({url,method,body})=>{if(url.endsWith('/templates')&&method==='POST'){stored={id:12,version:1,...body};return Response.json({template:stored},{status:201});}if(url.includes('/templates/by-request/'))return Response.json({template:stored});if(url.includes('/audit-source?'))return Response.json({client:{id:2,nom:'Acme TI'},template:stored});}});
  try{await f.render();await f.input('Client','2');await f.click('Nouvelle procédure client');await f.input('Nom du modèle','Générale');await f.click('Ajouter une section');await f.input('Titre de section 1','Commun');await f.click('Ajouter une étape 1');await f.input('Titre étape 1.1','CLIENT-SAVED');
- await captureDownloads(f,async({blobs,read})=>{await f.click('Télécharger la procédure HTML');assert.equal(blobs.length,0);await f.click('Sauvegarder le modèle');assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'12');await f.click('Télécharger la procédure HTML');assert.match(await read(blobs[0]),/CLIENT-SAVED/);await f.click('Télécharger le script .ps1');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,stored.sections);});
+ await captureDownloads(f,async({blobs,read})=>{await f.click('Télécharger la procédure HTML');assert.equal(blobs.length,0);await f.click('Enregistrer pour ce client');assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'12');await f.click('Télécharger la procédure HTML');assert.match(await read(blobs[0]),/CLIENT-SAVED/);await f.click('Télécharger la trousse d’audit (.zip)');assert.deepEqual(globalThis.__scriptConfig.procedure.sections,stored.sections);});
  assert.equal(f.requests.filter(r=>r.method==='POST').length,1);assert.ok(f.requests.some(r=>r.url.includes('/templates/by-request/')));assert.ok(!f.requests.some(r=>r.url.includes('/dossiers')&&r.method!=='GET'));
  }finally{await f.cleanup();}
 });
@@ -365,7 +398,7 @@ test('new client procedure saves through templates, reads its receipt, and expor
 test('historical active dossiers are immutable consultation; opening one preserves unsaved general procedure and blocks both exports',async()=>{
  const before=JSON.stringify(dossier);const f=fixture({dossiers:[dossier]});try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Titre étape 1.1','UNSAVED-GENERAL');await f.click('Ouvrir Alice · Acme TI');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'UNSAVED-GENERAL');
  assert.ok([...f.dom.window.document.querySelectorAll('.workstation-print-control')].every(e=>e.disabled));assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]').value,'Alice');assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]').disabled,true);
- await captureDownloads(f,async({blobs})=>{await f.click('Télécharger la procédure HTML');await f.click('Télécharger le script .ps1');assert.equal(blobs.length,0);});assert.equal(JSON.stringify(dossier),before);assert.ok(f.requests.every(r=>r.method==='GET'));assert.doesNotMatch(f.dom.window.document.body.textContent,/Sauvegarder le dossier|Archiver le dossier/);
+ await captureDownloads(f,async({blobs})=>{await f.click('Télécharger la procédure HTML');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(blobs.length,0);});assert.equal(JSON.stringify(dossier),before);assert.ok(f.requests.every(r=>r.method==='GET'));assert.doesNotMatch(f.dom.window.document.body.textContent,/Sauvegarder le dossier|Archiver le dossier/);
  }finally{await f.cleanup();}
 });
 
@@ -382,16 +415,16 @@ async function draftClientProcedure(f,name='Original procedure') {
 }
 test('uncertain template creation retries only the original UUID and payload; an unconfirmed readback preserves pending receipt and draft',async()=>{
  let attempts=0,payload;const f=fixture({override:({url,method,body})=>{if(url.endsWith('/templates')&&method==='POST'){payload=body;attempts++;return attempts===1?Promise.reject(Error('Lost response')):Response.json({template:{...body,id:22,version:1}});}if(method==='PUT'&&url.endsWith('/templates/22'))return Response.json({template:{id:22,clientId:2,version:2,name:body.name,sections:body.sections}});if(url.includes('/templates/by-request/'))return attempts===1?Response.json({error:'Not found'},{status:404}):Response.json({template:{...payload,id:22,version:1}});}});
- try{await f.render();await draftClientProcedure(f);await f.click('Sauvegarder le modèle');const receipt=f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1');assert.ok(receipt);await f.input('Nom du modèle','Newer draft');await f.click('Réessayer la création du modèle');const posts=f.requests.filter(r=>r.method==='POST');assert.equal(posts.length,2);assert.deepEqual(posts[0].body,posts[1].body);assert.match(posts[0].body.requestKey,/^[a-f\d-]{36}$/);assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Newer draft');assert.match(f.dom.window.document.body.textContent,/Original procedure/);await f.click('Sauvegarder le modèle');assert.equal(f.requests.filter(r=>r.method==='POST').length,2,'newer edits must update the confirmed procedure, never create a duplicate');assert.ok(f.requests.some(r=>r.method==='PUT'&&r.url.endsWith('/templates/22')));}
+ try{await f.render();await draftClientProcedure(f);await f.click('Enregistrer pour ce client');const receipt=f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1');assert.ok(receipt);await f.input('Nom du modèle','Newer draft');await f.click('Réessayer la création du modèle');const posts=f.requests.filter(r=>r.method==='POST');assert.equal(posts.length,2);assert.deepEqual(posts[0].body,posts[1].body);assert.match(posts[0].body.requestKey,/^[a-f\d-]{36}$/);assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Newer draft');assert.match(f.dom.window.document.body.textContent,/Original procedure/);await f.click('Enregistrer pour ce client');assert.equal(f.requests.filter(r=>r.method==='POST').length,2,'newer edits must update the confirmed procedure, never create a duplicate');assert.ok(f.requests.some(r=>r.method==='PUT'&&r.url.endsWith('/templates/22')));}
  finally{await f.cleanup();}
 });
 
 test('mismatched creation readback cannot erase the receipt or editable draft',async()=>{
- const f=fixture({override:({url})=>url.includes('/templates/by-request/')?Response.json({template:{...template,id:23,name:'Wrong receipt'}}):undefined});try{await f.render();await draftClientProcedure(f);await f.click('Sauvegarder le modèle');assert.ok(f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1'));assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Original procedure');assert.match(f.dom.window.document.body.textContent,/Création non confirmée/);assert.doesNotMatch(f.dom.window.document.body.textContent,/Modèle sauvegardé/);}finally{await f.cleanup();}
+ const f=fixture({override:({url})=>url.includes('/templates/by-request/')?Response.json({template:{...template,id:23,name:'Wrong receipt'}}):undefined});try{await f.render();await draftClientProcedure(f);await f.click('Enregistrer pour ce client');assert.ok(f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1'));assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Original procedure');assert.match(f.dom.window.document.body.textContent,/Création non confirmée/);assert.doesNotMatch(f.dom.window.document.body.textContent,/Procédure enregistrée pour Acme TI/);}finally{await f.cleanup();}
 });
 
 test('400 pending-template cleanup failure blocks new keys and keeps corrected draft',async()=>{
- const f=fixture({override:({url,method})=>url.endsWith('/templates')&&method==='POST'?Response.json({error:'Nom invalide'},{status:400}):undefined});try{await f.render();await draftClientProcedure(f);const proto=f.dom.window.Storage.prototype,remove=proto.removeItem;try{proto.removeItem=function(){};await f.click('Sauvegarder le modèle');const receipt=f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1');assert.ok(receipt);await f.input('Nom du modèle','Corrected');await f.click('Sauvegarder le modèle');assert.equal(f.requests.filter(r=>r.method==='POST').length,1);assert.equal(f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1'),receipt);assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Corrected');}finally{proto.removeItem=remove;}}finally{await f.cleanup();}
+ const f=fixture({override:({url,method})=>url.endsWith('/templates')&&method==='POST'?Response.json({error:'Nom invalide'},{status:400}):undefined});try{await f.render();await draftClientProcedure(f);const proto=f.dom.window.Storage.prototype,remove=proto.removeItem;try{proto.removeItem=function(){};await f.click('Enregistrer pour ce client');const receipt=f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1');assert.ok(receipt);await f.input('Nom du modèle','Corrected');await f.click('Enregistrer pour ce client');assert.equal(f.requests.filter(r=>r.method==='POST').length,1);assert.equal(f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1'),receipt);assert.equal(f.dom.window.document.querySelector('[aria-label="Nom du modèle"]').value,'Corrected');}finally{proto.removeItem=remove;}}finally{await f.cleanup();}
 });
 
 test('delayed legacy dossier receipt reconciles history without replacing selected client procedure or its unsaved edits',async()=>{
@@ -488,3 +521,30 @@ test('late legacy receipt clears its recovery marker but never restores a delete
  }});
  try{await f.render();f.dom.window.confirm=()=>true;await f.click('Supprimer l’historique');await act(async()=>release());assert.doesNotMatch(f.dom.window.document.body.textContent,/Ouvrir Alice|Dossier créé|Création en attente/);assert.equal(f.dom.window.sessionStorage.length,0);assert.ok(!f.dom.window.document.querySelector('[aria-label="Employé"]'));}finally{release();await f.cleanup();}
 });
+
+
+for (const change of ['client','variant','settings','editor','verification-failed','same-account-rearm','account','logout','unmount']) {
+ test(`ZIP completion rechecks ${change} after real asynchronous compression`,async()=>{
+  let release;globalThis.__bundleGate=new Promise(r=>release=r);
+  const f=fixture({templates:[template,variant,otherProcedure],override:clientOverride});
+  const oldCreate=URL.createObjectURL,oldClick=f.dom.window.HTMLAnchorElement.prototype.click;let downloads=0;
+  URL.createObjectURL=()=>{downloads++;return 'blob:fixture';};f.dom.window.HTMLAnchorElement.prototype.click=function(){};
+  try{
+   await f.render();await f.input('Client','2');await f.input('Modèle','3');
+   await act(()=>[...f.dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Télécharger la trousse d’audit (.zip)').click());
+   for(let i=0;!globalThis.__bundleReady&&i<100;i++)await act(async()=>{await new Promise(r=>setTimeout(r,5));});
+   assert.equal(globalThis.__bundleReady,true,'actual ZIP serialization completed before context change');assert.equal(downloads,0);
+   if(change==='client')await f.input('Client','7');
+   if(change==='variant')await f.input('Modèle','8');
+   if(change==='settings')await f.input('Préfixe du client','NEW-');
+   if(change==='editor')await f.input('Titre étape 1.1','NEW unsaved note');
+   if(['verification-failed','same-account-rearm','account','logout'].includes(change)){
+    await act(async()=>{f.auth.start();});
+    if(change!=='verification-failed'){f.auth.verified=true;f.auth.loading=false;if(change==='account')f.auth.user={id:2,role:'admin'};if(change==='logout')f.auth.user=null;await f.render();}
+   }
+   if(change==='unmount')await f.unmount();
+   await act(async()=>{release();await Promise.all(globalThis.__bundleTasks);});
+   assert.equal(downloads,0,'no stale ZIP Blob or download');assert.doesNotMatch(f.dom.window.document.body.textContent,/Trousse ZIP générée/);
+  }finally{release();delete globalThis.__bundleGate;URL.createObjectURL=oldCreate;f.dom.window.HTMLAnchorElement.prototype.click=oldClick;await f.cleanup();}
+ });
+}

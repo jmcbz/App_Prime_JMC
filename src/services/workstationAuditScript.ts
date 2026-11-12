@@ -40,6 +40,9 @@ const SCRIPT_TEMPLATE = String.raw`<#
     Un chemin relatif part du dossier courant de PowerShell, pas automatiquement de Téléchargements.
     Utiliser un chemin absolu entre guillemets (espaces, accents et OneDrive acceptés).
     Rapport sur le Bureau : AuditPoste_<NOMPC>_<date>.html ; chemin complet affiché en console.
+    Après écriture, ouverture automatique du HTML dans l'application associée, avant la pause.
+    Une demande acceptée par Windows ne confirme pas l'affichage ; un échec affiche son diagnostic.
+    -NoPause ne désactive pas cette ouverture ; son échec conserve le rapport et le code d'audit.
     Si le chemin du Bureau est vide : repli dans le dossier du script, existant et accessible en écriture.
     Pour choisir un autre dossier existant : -ReportDir "<dossier de rapport>" (aucun dossier créé).
     La fenêtre attend Entrée par défaut avant la sortie, même en cas d'erreur d'exécution.
@@ -386,7 +389,15 @@ try {
 Write-Host ""
 Write-Host "Rapport : $fichier" -ForegroundColor Cyan
 if (-not $complete) { Write-Host 'Audit non validé : consulter les échecs et validations restantes dans le rapport (code 1).' -ForegroundColor Yellow }
-try { Start-Process -FilePath $fichier } catch {}
+# Ouverture du fichier associé par le shell Windows, sans commande ni arguments interpolés.
+try {
+    Start-Process -FilePath $fichier -Verb Open -ErrorAction Stop
+    Write-Host 'Ouverture automatique demandée à Windows (affichage non confirmé). Si aucune fenêtre ne paraît, ouvrir le chemin du rapport ci-dessus.' -ForegroundColor Cyan
+} catch {
+    Write-Warning ('Ouverture automatique du rapport impossible : {0}' -f $_.Exception.Message) -WarningAction Continue
+    Write-Host ('Rapport conservé : {0}' -f $fichier) -ForegroundColor Yellow
+    Write-Host 'Ouvrir ce fichier HTML manuellement dans une session interactive avec une application associée. Le code de sortie reste celui de l''audit.' -ForegroundColor Yellow
+}
 Wait-AuditClose
 exit $(if ($complete) { 0 } else { 1 })
 `;

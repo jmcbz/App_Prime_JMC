@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { unlink, writeFile } from 'node:fs/promises';
+import JSZip from 'jszip';
+const outfile = new URL('./.audit-bundle-test.mjs', import.meta.url).pathname;
+await build({entryPoints:[new URL('./workstationAuditBundle.ts', import.meta.url).pathname],outfile,bundle:true,format:'esm',platform:'node',packages:'external'});
+const {generateWorkstationAuditBundle} = await import(outfile);
+await unlink(outfile);
+test('ZIP contains exactly a UTF-8 BOM/CRLF PS1 and its ASCII/CRLF CMD with CRC validation', async()=>{
+  const scriptText = "# Client é 🍁\rWrite-Host 'L’Intendant'\n# fin\r\n";
+  const bundle = await generateWorkstationAuditBundle({clientId:2,templateId:3,scriptText});
+  assert.equal(bundle.fileName,'audit-client-2-procedure-3.zip');
+  const archive = await JSZip.loadAsync(bundle.bytes,{checkCRC32:true});
+  assert.deepEqual(Object.keys(archive.files).sort(),['audit-client-2-procedure-3.ps1','lancer-audit-client-2-procedure-3.cmd']);
+  const ps = await archive.file('audit-client-2-procedure-3.ps1').async('nodebuffer');
+  assert.deepEqual(ps,Buffer.from('\uFEFF'+scriptText.replace(/\r\n|\r|\n/g,'\r\n'),'utf8'));
+  const cmd = await archive.file('lancer-audit-client-2-procedure-3.cmd').async('nodebuffer');
+  assert.ok([...cmd].every(b=>b<128));
+  const text=cmd.toString('ascii');assert.ok(!/(?<!\r)\n/.test(text));
+  assert.match(text,/set "auditScript=%~dp0audit-client-2-procedure-3\.ps1"/);
+  assert.match(text,/DisableDelayedExpansion/);assert.match(text,/-File "%auditScript%" -NoPause\r\nset "auditExit=%errorlevel%"/);
+  assert.match(text,/if not exist "%auditScript%"/);assert.match(text,/if not exist "%auditPowerShell%"/);
+  assert.match(text,/set \/p .*<CON\r\nendlocal & exit \/b %auditExit%/);
+  assert.doesNotMatch(text,/\bcall\b|-Command|%\*|-NoExit/i);
+  if(process.env.AUDIT_BUNDLE_OUTPUT) await writeFile(process.env.AUDIT_BUNDLE_OUTPUT,Buffer.from(bundle.bytes));
+});
+test('identity-only filenames distinguish clients and procedure variants and reject unsafe IDs',async()=>{
+  const names=[];
+  for(const [clientId,templateId] of [[2,3],[4,3],[2,7]])names.push((await generateWorkstationAuditBundle({clientId,templateId,scriptText:'# test'})).fileName);
+  assert.equal(new Set(names).size,3);assert.ok(names.every(n=>/^[a-z0-9-]+\.zip$/.test(n)));
+  for(const id of [0,-1,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1,'2','2&echo BAD'])await assert.rejects(()=>generateWorkstationAuditBundle({clientId:id,templateId:3,scriptText:'# test'}),/identit/i);
+});

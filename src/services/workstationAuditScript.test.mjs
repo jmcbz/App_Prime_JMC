@@ -687,7 +687,13 @@ function Get-WinUserLanguageList { return [pscustomobject]@{LanguageTag='fr-CA';
 function Get-Printer { [CmdletBinding()]param() return [pscustomobject]@{Name='TOSHIBA.[ modèle é'} }
 function Get-BitLockerVolume { [CmdletBinding()]param($MountPoint) return [pscustomobject]@{ProtectionStatus='On';EncryptionPercentage=100} }
 function dsregcmd { $global:LASTEXITCODE=0; 'AzureAdJoined : YES' }
-function Start-Process { param($FilePath) Write-Host "FIXTURE_BROWSER_SUPPRESSED $FilePath" }
+function Start-Process {
+ [CmdletBinding()]param($FilePath,$Verb)
+ if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $FilePath -PathType Leaf)) {throw 'Viewer called before report exists'}
+ if (-not ([System.IO.File]::ReadAllText($FilePath).Contains('</html>'))) {throw 'Viewer called before report complete'}
+ Write-Host ("FIXTURE_OPEN " + (@{path=$FilePath;verb=$Verb;errorAction=[string]$PSBoundParameters['ErrorAction']} | ConvertTo-Json -Compress))
+ if ($global:FixtureScenario -like 'viewer-*') {Write-Error 'Fixture association/session unavailable'}
+}
 function New-Object {
  [CmdletBinding()]param([Parameter(Position=0)][string]$TypeName,[string]$ComObject)
  if (-not $ComObject) { return ,(Microsoft.PowerShell.Utility\New-Object -TypeName $TypeName) }
@@ -708,7 +714,7 @@ function New-Object {
  return $session
 }
 function Read-Host { param($Prompt) Write-Host "FIXTURE_READ_HOST"; if ($global:FixtureScenario -eq 'pause-unavailable') {throw 'Fixture console unavailable'}; return "" }
-if ($Scenario -eq 'pause-unavailable') {$WarningPreference='Stop'}
+if ($Scenario -in @('pause-unavailable','viewer-error')) {$WarningPreference='Stop'}
 $invoke=@{}
 if ($PauseAudit) {$invoke.Pause=$true}
 if ($NoPauseAudit) {$invoke.NoPause=$true}
@@ -740,7 +746,7 @@ function fullRun({dirMode='valid',pause=false,scenario='healthy',opts=fullOption
     if(dirMode==='blank')reportDir='';
     if(dirMode==='whitespace')reportDir=' \t ';
     if(dirMode==='missing')reportDir=join(dir,'absent','Bureau');
-    if(dirMode==='onedrive') {reportDir=join(dir,'OneDrive - Client é','Bureau');mkdirSync(reportDir,{recursive:true});}
+    if(dirMode==='onedrive') {reportDir=join(dir,"OneDrive - L'Intendant é [rapport]",'Bureau');mkdirSync(reportDir,{recursive:true});}
     // The isolation runner mounts /opt/pwsh read-only. No OS configuration is written.
     if(dirMode==='readonly')reportDir='/opt/pwsh';
     const args=['-NoProfile','-NonInteractive','-File',wrapper,'-ScriptPath',file,'-Scenario',scenario];
@@ -755,6 +761,44 @@ function fullRun({dirMode='valid',pause=false,scenario='healthy',opts=fullOption
   } finally {rmSync(dir,{recursive:true,force:true});}
 }
 
+for (const [scenario,expected] of [['healthy',0],['one-update',1]]) {
+  for (const pause of ['default',false,'both']) test(`HTML auto-open ${scenario} pause=${pause} sends one literal associated-file launch after write before pause`, () => {
+    fullRun({scenario,pause,dirMode:'onedrive'}, run => {
+      assert.equal(run.status,expected,run.stderr);
+      const calls=[...run.stdout.matchAll(/FIXTURE_OPEN (.*)/g)].map(m=>JSON.parse(m[1]));
+      assert.deepEqual(calls,[{path:join(run.reportDir,run.reports[0]),verb:'Open',errorAction:'Stop'}]);
+      assert.ok(run.stdout.indexOf('Rapport :') < run.stdout.indexOf('FIXTURE_OPEN'));
+      assert.match(run.stdout,/Ouverture automatique demandée/);
+      assert.match(run.stdout,/affichage non confirmé/);
+      if(pause==='default') assert.ok(run.stdout.indexOf('FIXTURE_OPEN') < run.stdout.indexOf('FIXTURE_READ_HOST'));
+      else assert.doesNotMatch(run.stdout,/FIXTURE_READ_HOST/);
+    });
+  });
+}
+
+for (const [expected,opts] of [[0,fullOptions],[1,{...fullOptions,procedure:{name:'Manuel',sections:[{title:'Validation',steps:[{id:'manual',title:'Valider',note:''}]}]}}]]) {
+  for (const pause of ['default',false]) test(`HTML auto-open failure keeps report and audit exit ${expected} pause=${pause} with diagnostic`, () => {
+    fullRun({scenario:'viewer-error',pause,opts,dirMode:'onedrive'}, run => {
+      assert.equal(run.status,expected,run.stderr);
+      assert.equal(run.reports.length,1);
+      assert.equal((run.stdout.match(/FIXTURE_OPEN /g)||[]).length,1);
+      const text=run.stdout+run.stderr;
+      assert.match(text,/Ouverture automatique du rapport impossible.*Fixture association\/session unavailable/s);
+      assert.ok(text.includes(`Rapport conservé : ${join(run.reportDir,run.reports[0])}`));
+      assert.doesNotMatch(text,/Ouverture automatique demandée|Erreur inattendue|Écriture du rapport impossible/);
+      if(pause==='default') assert.ok(run.stdout.indexOf('Rapport conservé :') < run.stdout.indexOf('FIXTURE_READ_HOST'));
+      else assert.doesNotMatch(run.stdout,/FIXTURE_READ_HOST/);
+    });
+  });
+}
+for(const dirMode of ['blank','readonly']) test(`HTML auto-open not attempted if report write fails (${dirMode})`,()=>{
+  fullRun({dirMode,pause:'default'},run=>{
+    assert.equal(run.status,2,run.stderr);assert.equal(run.reports.length,0);
+    assert.doesNotMatch(run.stdout,/FIXTURE_OPEN|Ouverture automatique demandée/);
+    assert.equal((run.stdout.match(/FIXTURE_READ_HOST/g)||[]).length,1);
+  });
+});
+
 test('full script pauses by default before a complete exit', () => {
   fullRun({pause:'default'}, run => {
     assert.equal(run.status,0,run.stderr);
@@ -764,7 +808,7 @@ test('full script pauses by default before a complete exit', () => {
 });
 
 for (const stage of ['early','late','after-report']) test(`full script unexpected ${stage} failure shows diagnostics and pauses before technical exit`, () => {
-  const marker = stage==='early' ? '# Configuration client' : stage==='late' ? '# ============================ RAPPORT' : 'try { Start-Process -FilePath $fichier } catch {}';
+  const marker = stage==='early' ? '# Configuration client' : stage==='late' ? '# ============================ RAPPORT' : '# Ouverture du fichier associé par le shell Windows';
   const transform = s => s.replace(marker, `throw 'Fixture unexpected ${stage}' # SOURCE_SECRET_NOT_FOR_DIAGNOSTICS\n${marker}`);
   fullRun({pause:'default',transform}, run => {
     assert.equal(run.status,2,run.stderr);
