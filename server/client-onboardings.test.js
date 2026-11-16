@@ -158,14 +158,14 @@ try {
     const newDossier=await createOnboarding({...data,client_id:second.id},items,A);
     assert.equal(newDossier.client_id,second.id);
     driver.sqlite.prepare('UPDATE clients SET prime_id=? WHERE id=?').run(b.prime.id,first.id);
-    await assert.rejects(db.getClientOnboarding(dossier.id,A),e=>e.statusCode===404);
+    assert.equal((await db.getClientOnboarding(dossier.id,A)).client_id,first.id);
     const edited=await db.updateClientOnboarding(dossier.id,{...data,client_id:first.id,technicien_id:b.user.id,titre:'Même client'},items,B,1);
     assert.equal(edited.client_id,first.id);assert.equal(edited.version,2);
     assert.equal((await db.getClientOnboardingHistory(dossier.id,B)).events.length,2);
     driver.sqlite.prepare('DELETE FROM client_onboardings WHERE id IN (?,?)').run(dossier.id,newDossier.id);
     driver.sqlite.prepare('DELETE FROM clients WHERE id IN (?,?)').run(first.id,second.id);
   });
-  await test('request key is mandatory, unique and reconciles only current TI scope',async()=>{
+  await test('request key is mandatory, unique and reconciles only its creator within linked Prime scope',async()=>{
     const key=randomUUID();
     await assert.rejects(db.createClientOnboarding(data,items,A),e=>e.statusCode===400);
     await assert.rejects(db.createClientOnboarding(data,items,A,'not-a-uuid'),e=>e.statusCode===400);
@@ -181,12 +181,12 @@ try {
     assert.deepEqual(await db.reconcileClientOnboarding(key,A),{found:true,id:first.id,archived:true});
     await assert.rejects(db.createClientOnboarding(data,items,A,key),e=>e.statusCode===409);
     await assert.rejects(db.createClientOnboarding({...data,titre:'Different'},items,A,key),e=>e.statusCode===409);
-    await assert.rejects(db.createClientOnboarding(data,items,B,key),e=>e.statusCode===404);
+    await assert.rejects(db.createClientOnboarding(data,items,B,key),e=>e.statusCode===409);
     const foreign=await db.createClient({nom:'Foreign key fixture',clientType:'ti',primeId:b.prime.id});
     await assert.rejects(db.createClientOnboarding({...data,client_id:foreign.id,technicien_id:b.user.id},items,B,key),e=>e.statusCode===409);
     await assert.rejects(db.reconcileClientOnboarding(key,B),e=>e.statusCode===404);
     const other=await db.createClient({nom:'Telecom key',clientType:'telecom',primeId:a.prime.id});
-    await assert.rejects(db.createClientOnboarding({...data,client_id:other.id},items,A,randomUUID()),e=>e.statusCode===404);
+    assert.equal((await db.createClientOnboarding({...data,client_id:other.id},items,A,randomUUID())).client_id,other.id);
     assert.equal(driver.sqlite.prepare('PRAGMA table_info(client_onboardings)').all().find(c=>c.name==='request_key').notnull,1);
   });
   await test('item order rejects null, false and nonintegers',async()=>{
@@ -320,21 +320,26 @@ try {
   await test('create, options, permissions, versions, archive, restore, transfer, history',async()=>{
     const unknown=await db.createClient({nom:'Imported telecom',secteur:'TI',servoClientId:321234,primeId:a.prime.id});
     assert.equal(unknown.clientType,null);
-    assert.deepEqual((await db.clientOnboardingOptions(A)).clients.map(c=>c.id),[client.id]);
-    await assert.rejects(createOnboarding({...data,client_id:unknown.id},items,A),e=>e.statusCode===404);
+    const expectedClients=driver.sqlite.prepare('SELECT id FROM clients WHERE prime_id IS NOT NULL ORDER BY id').all().map(c=>c.id);
+    assert.deepEqual((await db.clientOnboardingOptions(A)).clients.map(c=>c.id),expectedClients);
+    const unclassified=await createOnboarding({...data,client_id:unknown.id},items,A);
+    assert.equal(unclassified.client_id,unknown.id);
+    driver.sqlite.prepare('DELETE FROM client_onboardings WHERE id=?').run(unclassified.id);
     const classified=await db.updateClient(unknown.id,{nom:unknown.nom,secteur:unknown.secteur,primeId:a.prime.id,clientType:'ti'},{primeId:a.prime.id,servoClientId:321234});
     assert.equal(classified.clientType,'ti');
-    assert.deepEqual((await db.clientOnboardingOptions(A)).clients.map(c=>c.id),[client.id,unknown.id]);
+    assert.deepEqual((await db.clientOnboardingOptions(A)).clients.map(c=>c.id),expectedClients);
     await assert.rejects(db.updateClient(unknown.id,{nom:'Bad',clientType:'invalid',primeId:a.prime.id},{primeId:a.prime.id,servoClientId:321234}),e=>e.statusCode===400);
     assert.equal((await db.updateClient(unknown.id,{nom:'Retained',primeId:a.prime.id},{primeId:a.prime.id,servoClientId:321234})).clientType,'ti');
     const first=await createOnboarding({...data,client_id:unknown.id},items,A);
     await assert.rejects(db.updateClient(unknown.id,{nom:'Retained',clientType:null,primeId:a.prime.id},{primeId:a.prime.id,servoClientId:321234}),e=>e.statusCode===409);
     await assert.rejects(db.updateClient(unknown.id,{nom:'Retained',clientType:'invalid',primeId:a.prime.id},{primeId:a.prime.id,servoClientId:321234}),e=>e.statusCode===400);
     assert.equal((await db.getClientOnboarding(first.id,A)).items.length,1);
-    assert.deepEqual((await db.clientOnboardingOptions(A)).clients.map(c=>c.id),[client.id,unknown.id]);
-    assert.deepEqual((await db.clientOnboardingOptions(A)).techniciens.map(t=>t.id),[a.user.id]);
-    await assert.rejects(createOnboarding({...data,client_id:telecom.id},items,A),e=>e.statusCode===404);
-    await assert.rejects(createOnboarding({...data,technicien_id:b.user.id},items,A),e=>e.statusCode===400);
+    assert.deepEqual((await db.clientOnboardingOptions(A)).clients.map(c=>c.id),expectedClients);
+    assert.deepEqual((await db.clientOnboardingOptions(A)).techniciens.map(t=>t.id),[a.user.id,b.user.id]);
+    const telecomDossier=await createOnboarding({...data,client_id:telecom.id},items,A);
+    assert.equal(telecomDossier.client_id,telecom.id);
+    driver.sqlite.prepare('DELETE FROM client_onboardings WHERE id=?').run(telecomDossier.id);
+    await assert.rejects(createOnboarding({...data,technicien_id:admin.id},items,A),e=>e.statusCode===400);
     await assert.rejects(createOnboarding({...data,client_id:999999},items,A),e=>e.statusCode===404);
     await assert.rejects(createOnboarding(data,[{...items[0],echeance:'2026-02-30'}],A),e=>e.statusCode===400);
     const created=await createOnboarding({...data,created_by_email:'forged@example.test',actor_email:'forged@example.test'},items,A);
@@ -345,8 +350,8 @@ try {
     assert.equal((await db.listClientOnboardings(A,{})).length,2);
     assert.equal((await db.listClientOnboardings(A,{client_id:String(client.id),technicien_id:String(a.user.id),statut:'À faire'})).length,1);
     assert.equal((await db.listClientOnboardings(A,{client_id:String(telecom.id)})).length,0);
-    assert.equal((await db.listClientOnboardings(B,{})).length,0);
-    await assert.rejects(db.getClientOnboarding(created.id,B),e=>e.statusCode===404);
+    assert.equal((await db.listClientOnboardings(B,{})).length,2);
+    assert.equal((await db.getClientOnboarding(created.id,B)).id,created.id);
     await assert.rejects(db.updateClientOnboarding(created.id,data,items,A,2),e=>e.statusCode===409);
     const edited=await db.updateClientOnboarding(created.id,{...data,titre:'Modifié'},items,A,1);
     assert.equal(edited.version,2);assert.equal(edited.titre,'Modifié');
@@ -358,9 +363,9 @@ try {
     assert.equal((await db.listClientOnboardings(A,{})).length,2);
     assert.equal((await db.listClientOnboardings(A,{archived:'true'})).length,0);
     driver.sqlite.prepare('UPDATE clients SET prime_id=? WHERE id=?').run(b.prime.id,client.id);
-    await assert.rejects(db.getClientOnboarding(created.id,A),e=>e.statusCode===404);
+    assert.equal((await db.getClientOnboarding(created.id,A)).id,created.id);
     assert.equal((await db.getClientOnboardingHistory(created.id,B)).events[0].actor_email,A.email);
-    await assert.rejects(db.updateClientOnboarding(created.id,data,items,A,4),e=>e.statusCode===404);
+    await assert.rejects(db.archiveClientOnboarding(created.id,A,4),e=>e.statusCode===404);
     const transferred=await db.updateClientOnboarding(created.id,{...data,technicien_id:null},items,B,4);
     assert.equal(transferred.technicien_id,null);assert.equal(transferred.version,5);
     assert.equal((await db.getClientOnboarding(created.id,ADMIN)).version,5);
@@ -462,15 +467,15 @@ try {
       await db.archiveClientOnboarding(firstPost.data.id,A,1);
       assert.deepEqual((await request('/api/client-onboardings/reconcile?requestKey='+idempotentKey,tokenA)).data,{found:true,id:firstPost.data.id,archived:true});
       driver.sqlite.prepare('UPDATE clients SET prime_id=? WHERE id=?').run(b.prime.id,keyedClient.id);
-      assert.equal((await request('/api/client-onboardings/reconcile?requestKey='+idempotentKey,tokenA)).status,404);
+      assert.equal((await request('/api/client-onboardings/reconcile?requestKey='+idempotentKey,tokenA)).status,200);
       assert.equal((await request('/api/client-onboardings/reconcile?requestKey='+idempotentKey,tokenB)).status,404);
       driver.sqlite.prepare("UPDATE clients SET data=json_set(data,'$.clientType','telecom') WHERE id=?").run(keyedClient.id);
       assert.equal((await request('/api/client-onboardings/reconcile?requestKey='+idempotentKey,tokenB)).status,404);
       driver.sqlite.prepare("UPDATE clients SET data=json_set(data,'$.clientType','ti') WHERE id=?").run(keyedClient.id);
       const imported=await db.createClient({nom:'Servo telecom',secteur:'TI',servoClientId:765432,primeId:a.prime.id});
       assert.equal(imported.clientType,null);
-      assert.equal((await request('/api/client-onboardings/options',tokenA)).data.clients.some(c=>c.id===imported.id),false);
-      assert.equal((await request('/api/client-onboardings',tokenA,'POST',{onboarding:{...data,client_id:imported.id},items})).status,404);
+      assert.equal((await request('/api/client-onboardings/options',tokenA)).data.clients.some(c=>c.id===imported.id),true);
+      assert.equal((await request('/api/client-onboardings',tokenA,'POST',{onboarding:{...data,client_id:imported.id},items})).status,201);
       assert.equal((await request(`/api/clients/${imported.id}`,tokenAdmin,'PUT',{client:{nom:imported.nom,primeId:a.prime.id,clientType:'ti'},expected:{primeId:a.prime.id,servoClientId:765432}})).status,200);
       assert.equal((await request('/api/client-onboardings/options',tokenA)).data.clients.some(c=>c.id===imported.id),true);
       const created=await request('/api/client-onboardings',tokenA,'POST',{onboarding:{...data,client_id:imported.id},items});
@@ -511,9 +516,9 @@ try {
       assert.equal(all.at(-2).snapshot.items[0].notes,'new');
       assert.equal((await request(`/api/client-onboardings/${id}/history?before=bad`,tokenA)).status,400);
       assert.equal((await request(`/api/client-onboardings/${id}/history?limit=501`,tokenA)).status,400);
-      assert.equal((await request(`/api/client-onboardings/${id}/history`,tokenB)).status,404);
+      assert.equal((await request(`/api/client-onboardings/${id}/history`,tokenB)).status,200);
       assert.equal((await request(`/api/clients/${imported.id}`,tokenAdmin,'PUT',{client:{nom:imported.nom,primeId:b.prime.id},expected:{primeId:a.prime.id,servoClientId:765432}})).status,200);
-      assert.equal((await request(`/api/client-onboardings/${id}/history`,tokenA)).status,404);
+      assert.equal((await request(`/api/client-onboardings/${id}/history`,tokenA)).status,200);
       assert.equal((await request(`/api/client-onboardings/${id}/history`,tokenB)).status,200);
       const prior=await db.createClient({nom:'HTTP private A',clientType:'ti',primeId:a.prime.id});
       const privateRecord=await request('/api/client-onboardings',tokenA,'POST',{onboarding:{...data,client_id:prior.id,titre:'HTTP A private title'},items:[{...items[0],notes:'HTTP A private note'}]});
@@ -522,7 +527,7 @@ try {
       const movedPrivate=await request(`/api/client-onboardings/${privateId}`,tokenAdmin,'PUT',{onboarding:{...data,client_id:imported.id,technicien_id:null,titre:'HTTP B title'},items:[{...items[0],notes:'HTTP B note'}],expectedVersion:1});
       assert.equal(movedPrivate.status,409);
       assert.equal((await request(`/api/client-onboardings/${privateId}`,tokenA)).data.client_id,prior.id);
-      assert.equal((await request(`/api/client-onboardings/${privateId}/history`,tokenB)).status,404);
+      assert.equal((await request(`/api/client-onboardings/${privateId}/history`,tokenB)).status,200);
       const adminHistory=await request(`/api/client-onboardings/${privateId}/history`,tokenAdmin);
       assert.equal(adminHistory.status,200);
       assert.equal(adminHistory.data.events.length,1);

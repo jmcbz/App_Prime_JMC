@@ -171,7 +171,7 @@ try {
     const replacement=await createOnboarding({...data,client_id:other.id},items,A);
     assert.equal(replacement.client_id,other.id);
     await pool.query('UPDATE clients SET prime_id=$1 WHERE id=$2',[b.prime.id,original.id]);
-    await assert.rejects(db.getClientOnboarding(dossier.id,A),e=>e.statusCode===404);
+    assert.equal((await db.getClientOnboarding(dossier.id,A)).client_id,original.id);
     const edited=await db.updateClientOnboarding(dossier.id,{...data,client_id:original.id,technicien_id:b.user.id,titre:'Même client PG'},items,B,1);
     assert.equal(edited.client_id,original.id);assert.equal(edited.version,2);
     assert.equal((await db.getClientOnboardingHistory(dossier.id,B)).events.length,2);
@@ -243,7 +243,7 @@ try {
         const result=await conn.query(sql,vals);
         if(!changed && String(sql).startsWith('SELECT o.id,o.client_id ')) {
           changed=true;
-          await pool.query("UPDATE clients SET data=jsonb_set(data,'{clientType}', '\"telecom\"'::jsonb) WHERE id=$1",[late.id]);
+          await pool.query('UPDATE clients SET prime_id=NULL WHERE id=$1',[late.id]);
         }
         if(String(sql)==='SELECT id FROM clients WHERE id=$1 FOR SHARE' && vals[0]===late.id) {signal();await held;}
         return result;
@@ -432,7 +432,7 @@ try {
       const sameClient=await mutate(probe,leftRow.id,{...data,client_id:left.id,technicien_id:null},items,actor(admin,'admin'),'updated',1);
       assert.equal(sameClient.version,2);
       await assert.rejects(mutate(probe,leftRow.id,{...data,client_id:right.id,technicien_id:null},items,actor(admin,'admin'),'updated',1),e=>e.statusCode===409);
-      await assert.rejects(mutate(probe,leftRow.id,{...data,client_id:left.id,technicien_id:null},items,actor(b.user),'updated',2),e=>e.statusCode===404);
+      assert.equal((await mutate(probe,leftRow.id,{...data,client_id:left.id,technicien_id:null},items,actor(b.user),'updated',2)).version,3);
     } finally {
       await pool.query('DELETE FROM client_onboardings WHERE id=ANY($1::int[])',[[leftRow.id,rightRow.id]]);
       await pool.query('DELETE FROM tableaux_suivi WHERE client_id=ANY($1::int[])',[[left.id,right.id]]);
@@ -492,8 +492,8 @@ try {
       await pool.query('DELETE FROM clients WHERE id=$1',[recipient.id]);
     }
   });
-  await test('PG list revalidates client ownership and TI type after candidate selection',async()=>{
-    for(const change of ['ownership','type']) {
+  await test('PG list revalidates Prime linkage while ownership and classification no longer restrict reads',async()=>{
+    for(const change of ['ownership','type','detached']) {
       const owned=await db.createClient({nom:`Recheck ${change}`,clientType:'ti',primeId:a.prime.id});
       const dossier=await createOnboarding({...data,client_id:owned.id},items,actor(a.user));
       let changed=false;
@@ -503,7 +503,8 @@ try {
           const result=await conn.query(sql,vals);
           if(!changed && String(sql).startsWith('SELECT o.id,o.client_id ')) {
             changed=true;
-            if(change==='ownership') await pool.query('UPDATE clients SET prime_id=$1 WHERE id=$2',[b.prime.id,owned.id]);
+            if(change==='detached') await pool.query('UPDATE clients SET prime_id=NULL WHERE id=$1',[owned.id]);
+            else if(change==='ownership') await pool.query('UPDATE clients SET prime_id=$1 WHERE id=$2',[b.prime.id,owned.id]);
             else await pool.query("UPDATE clients SET data=jsonb_set(data,'{clientType}', '\"telecom\"'::jsonb) WHERE id=$1",[owned.id]);
           }
           return result;
@@ -513,7 +514,7 @@ try {
         const {list}=await import('./database/client-onboardings.js');
         const rows=await list(probe,actor(a.user),{clientId:String(owned.id)});
         assert(changed,'candidate query must be intercepted');
-        assert(!rows.some(r=>r.id===dossier.id),`${change} must be checked after client locks`);
+        assert.equal(rows.some(r=>r.id===dossier.id),change!=='detached',`${change} revalidated after client locks`);
       } finally {
         await pool.query('DELETE FROM client_onboardings WHERE id=$1',[dossier.id]);
         await pool.query('DELETE FROM tableaux_suivi WHERE client_id=$1',[owned.id]);
@@ -559,13 +560,17 @@ try {
     assert.equal((await pool.query("SELECT COUNT(*)::int n FROM pg_indexes WHERE tablename LIKE 'client_onboarding%' AND indexname LIKE 'idx_prime_onboarding%'")).rows[0].n,5);
     await checkPgMetierIdentity(pool);
     await migratePgMetier(pool, async()=>{});
-    assert.equal((await db.clientOnboardingOptions(actor(a.user))).clients.length,1);
+    assert.equal((await db.clientOnboardingOptions(actor(a.user))).clients.length,2);
     const unknown=await db.createClient({nom:'Unknown',secteur:'TI',primeId:a.prime.id});
     assert.equal(unknown.clientType,null);
-    await assert.rejects(createOnboarding({...data,client_id:unknown.id},items,actor(a.user)),e=>e.statusCode===404);
+    const unclassified=await createOnboarding({...data,client_id:unknown.id},items,actor(a.user));
+    assert.equal(unclassified.client_id,unknown.id);
+    await pool.query('DELETE FROM client_onboardings WHERE id=$1',[unclassified.id]);
     assert.equal((await db.updateClient(unknown.id,{nom:'Unknown',primeId:a.prime.id,clientType:'ti'},{primeId:a.prime.id,servoClientId:null})).clientType,'ti');
     assert.equal((await db.updateClient(unknown.id,{nom:'Unknown',primeId:a.prime.id},{primeId:a.prime.id,servoClientId:null})).clientType,'ti');
-    await assert.rejects(createOnboarding({...data,client_id:tele.id},items,actor(admin,'admin')),e=>e.statusCode===404);
+    const telecom=await createOnboarding({...data,client_id:tele.id},items,actor(admin,'admin'));
+    assert.equal(telecom.client_id,tele.id);
+    await pool.query('DELETE FROM client_onboardings WHERE id=$1',[telecom.id]);
     const created=await createOnboarding(data,items,actor(a.user));
     assert.equal(created.version,1);assert.equal(created.items[0].echeance,'2026-12-12');
     assert.equal(created.completed_items,1);
@@ -581,7 +586,7 @@ try {
       await pool.query('DELETE FROM client_onboardings WHERE id=$1',[result.id]);
     }
     await pool.query('DELETE FROM client_onboardings WHERE id=$1',[decoy.id]);
-    await assert.rejects(db.getClientOnboarding(created.id,actor(b.user)),e=>e.statusCode===404);
+    assert.equal((await db.getClientOnboarding(created.id,actor(b.user))).id,created.id);
     await assert.rejects(db.updateClientOnboarding(created.id,data,items,actor(a.user),999),e=>e.statusCode===409);
     const updated=await db.updateClientOnboarding(created.id,{...data,statut:'En cours'},[{...items[0],notes:'second'}],actor(a.user),1);
     assert.equal(updated.version,2);
@@ -596,7 +601,7 @@ try {
     await assert.rejects(db.updateClientOnboarding(created.id,data,items,actor(a.user),3),e=>e.statusCode===409);
     assert.equal((await db.restoreClientOnboarding(created.id,actor(a.user),3)).version,4);
     await pool.query('UPDATE clients SET prime_id=$1 WHERE id=$2',[b.prime.id,client.id]);
-    await assert.rejects(db.getClientOnboarding(created.id,actor(a.user)),e=>e.statusCode===404);
+    assert.equal((await db.getClientOnboarding(created.id,actor(a.user))).id,created.id);
     assert.equal((await db.getClientOnboardingHistory(created.id,actor(b.user))).events[0].actor_email,a.user.email);
     const moved=await db.updateClientOnboarding(created.id,{...data,technicien_id:null},items,actor(b.user),4);
     assert.equal(moved.version,5);
@@ -619,7 +624,7 @@ try {
       const probe={kind:'pg',pool:{connect:async()=>{
         const conn=await pool.connect();
         return {query:async(sql,vals)=>{
-          if (!intercepted && String(sql).startsWith('SELECT c.id,c.prime_id,c.data FROM clients c')) {
+          if (!intercepted && String(sql).startsWith('SELECT c.id,c.prime_id FROM clients c')) {
             intercepted=true;
             await pool.query('UPDATE client_onboardings SET client_id=$1 WHERE id=$2',[other.id,source.id]);
           }
@@ -668,7 +673,7 @@ try {
       await pool.query('UPDATE client_onboardings SET compte_rendu=$1 WHERE id=$2',[beforeNull.compte_rendu,created.id]);
       await pool.query('ALTER TABLE client_onboardings ALTER COLUMN compte_rendu SET NOT NULL');
     }
-    await assert.rejects(db.getClientOnboardingHistory(created.id,actor(a.user)),e=>e.statusCode===404);
+    assert.equal((await db.getClientOnboardingHistory(created.id,actor(a.user))).events.length,5);
     const imported=await db.updatePrimePortfolio(a.prime.id,{nom:a.prime.nom},{add:[{id:98981,nom:'TI imported',alias:''}],remove:[]});
     assert.equal(imported.clients.find(c=>c.servoClientId===98981).clientType,null);
     const detached=await db.createClient({nom:'Classified Servo',clientType:'ti',servoClientId:98982});
@@ -793,7 +798,9 @@ try {
       const importedResponse=await request('/api/clients',tokenAdmin,'POST',{nom:'Imported TI',secteur:'TI',primeId:a.prime.id});
       assert.equal(importedResponse.status,201);const imported=(await importedResponse.json()).client;
       assert.equal(imported.clientType,null);
-      assert.equal((await request('/api/client-onboardings',token,'POST',{onboarding:{...data,client_id:imported.id},items})).status,404);
+      const unclassified=await request('/api/client-onboardings',token,'POST',{onboarding:{...data,client_id:imported.id},items});
+      assert.equal(unclassified.status,201);
+      await pool.query('DELETE FROM client_onboardings WHERE id=$1',[(await unclassified.json()).id]);
       const classifiedResponse=await request(`/api/clients/${imported.id}`,tokenAdmin,'PUT',{client:{nom:imported.nom,clientType:'ti',primeId:a.prime.id},expected:{primeId:a.prime.id,servoClientId:null}});
       assert.equal(classifiedResponse.status,200);assert.equal((await classifiedResponse.json()).client.clientType,'ti');
       const key=randomUUID();
@@ -844,22 +851,22 @@ try {
       assert.equal((await request(`/api/clients/${imported.id}`,tokenAdmin,'PUT',{client:{nom:imported.nom,clientType:'telecom',primeId:a.prime.id},expected:{primeId:a.prime.id,servoClientId:null}})).status,409);
       const history=await request(`/api/client-onboardings/${importedId}/history?limit=1`,token);
       assert.equal(history.status,200);assert.equal((await history.json()).events[0].snapshot.items[0].notes,'preuve');
-      assert.equal((await request(`/api/client-onboardings/${importedId}/history`,tokenB)).status,404);
+      assert.equal((await request(`/api/client-onboardings/${importedId}/history`,tokenB)).status,200);
       const list=await request('/api/client-onboardings',token);
-      assert.equal(list.status,200);assert.equal((await list.json()).length,1);
+      assert.equal(list.status,200);assert.equal((await list.json()).length,2);
       const own=await request('/api/client-onboardings',tokenB);
-      assert.equal((await own.json()).length,1);
+      assert.equal((await own.json()).length,2);
       const invalid=await request('/api/client-onboardings',token,'POST',{onboarding:{...data,client_id:tele.id},items});
-      assert.equal(invalid.status,404);
+      assert.equal(invalid.status,201);
       const created=await request('/api/client-onboardings',tokenB,'POST',{onboarding:{...data,technicien_id:b.user.id},items});
       assert.equal(created.status,201);const posted=await created.json();
-      assert.equal((await request(`/api/client-onboardings/${posted.id}`,token)).status,404);
+      assert.equal((await request(`/api/client-onboardings/${posted.id}`,token)).status,200);
       assert.equal((await request(`/api/client-onboardings/${posted.id}`,tokenB)).status,200);
       assert.equal((await request(`/api/client-onboardings/${posted.id}`,tokenB,'PUT',{onboarding:{...data,technicien_id:b.user.id},items})).status,400);
       assert.equal((await request(`/api/client-onboardings/${posted.id}`,tokenB,'DELETE',{expectedVersion:1})).status,200);
       assert.equal((await request(`/api/client-onboardings/${posted.id}/restore`,tokenB,'POST',{expectedVersion:2})).status,200);
       await pool.query('UPDATE clients SET prime_id=$1 WHERE id=$2',[b.prime.id,imported.id]);
-      assert.equal((await request('/api/client-onboardings/reconcile?requestKey='+key,token)).status,404);
+      assert.equal((await request('/api/client-onboardings/reconcile?requestKey='+key,token)).status,200);
       assert.equal((await request('/api/client-onboardings/reconcile?requestKey='+key,tokenB)).status,404);
     }finally {child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}
   });

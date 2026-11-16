@@ -196,21 +196,28 @@ function shape(o, historical=false) {
   if (!historical || Object.hasOwn(o,'version')) result.version=o.version;
   return result;
 }
+// Non-destructive access is shared by this module only: any existing Prime
+// portfolio, regardless of client classification or the actor's own portfolio.
+async function onboardingClient(q,id,lock=false) {
+  const c=await row(q,`SELECT c.id,c.prime_id FROM clients c WHERE c.id=?${lock ? ' FOR UPDATE':''}`,[id]);
+  if (!c || !(await row(q,'SELECT id FROM primes WHERE id=?',[c.prime_id]))) fail(404,'Client introuvable');
+  return c;
+}
+// Keep the pre-existing TI/portfolio scope for archive and restore.
 async function scopedClient(q,id,actor,lock=false) {
   const c=await row(q,`SELECT c.id,c.prime_id,c.data FROM clients c WHERE c.id = ?${lock ? ' FOR UPDATE':''}`,[id]);
   if (!c || !eligible(c)) fail(404,'Client introuvable');
   if (actor.role !== 'admin' && !(await row(q,`SELECT 1 FROM prime_user_links WHERE user_id = ? AND prime_id = ?${lock ? ' FOR SHARE':''}`,[actor.sub,c.prime_id]))) fail(404,'Client introuvable');
   return c;
 }
-async function tech(q,id,actor) {
-  if (actor.role !== 'admin') {
-    if (id !== null && id !== actor.sub) fail(400,'Technicien non autorisé');
-  } else if (id !== null && !(await row(q,"SELECT 1 FROM users u JOIN prime_user_links l ON l.user_id=u.id WHERE u.id=? AND u.role='prime' AND u.is_active=?",[id,true]))) fail(400,'Technicien non autorisé');
+async function tech(q,id) {
+  // Match the module's options; assignment does not change account privileges.
+  if (id !== null && !(await row(q,'SELECT 1 FROM users u WHERE u.id=? AND u.is_active=? AND EXISTS (SELECT 1 FROM prime_user_links l WHERE l.user_id=u.id)',[id,true]))) fail(400,'Technicien non autorisé');
 }
 async function get(q,id,actor,lock=false) {
   const o=await row(q,'SELECT * FROM client_onboardings WHERE id = ?',[id]);
   if (!o) fail(404,'Prise en charge introuvable');
-  await scopedClient(q,o.client_id,actor,lock);
+  await onboardingClient(q,o.client_id,lock);
   // In READ COMMITTED, a transfer can commit between the initial lookup and
   // the client lock. Never load content under authorization for the old client.
   if (lock) {
@@ -262,9 +269,10 @@ async function history(q,id,event,actor,snapshot) {
 }
 export async function options(driver,actor) {
   const q=adapter(driver,driver.pool);
-  const clients=await q(`SELECT c.id,c.data FROM clients c ${actor.role==='admin'?'':'JOIN prime_user_links l ON l.prime_id=c.prime_id WHERE l.user_id=?'} ORDER BY c.id`,actor.role==='admin'?[]:[actor.sub]);
-  const users=await q(`SELECT u.id,u.prenom,u.nom,u.email FROM users u JOIN prime_user_links l ON l.user_id=u.id WHERE u.is_active=? AND u.role='prime' ${actor.role==='admin'?'':'AND u.id=?'} ORDER BY u.nom,u.prenom`,actor.role==='admin'?[true]:[true,actor.sub]);
-  return {clients:clients.filter(eligible).map(c=>({id:c.id,nom:json(c.data).nom})),techniciens:users};
+  const clients=await q('SELECT c.id,c.data FROM clients c JOIN primes p ON p.id=c.prime_id ORDER BY c.id');
+  // Prime membership is independent of the account's administrative role.
+  const users=await q(`SELECT u.id,u.prenom,u.nom,u.email FROM users u WHERE u.is_active=? AND EXISTS (SELECT 1 FROM prime_user_links l WHERE l.user_id=u.id) ORDER BY u.nom,u.prenom,u.id`,[true]);
+  return {clients:clients.map(c=>({id:c.id,nom:json(c.data).nom})),techniciens:users};
 }
 // Backfill can discover a lower client id after a later page; sorted locks
 // within one page alone cannot prevent a B -> A inversion across pages.
@@ -299,20 +307,20 @@ async function listRows(driver,q,actor,filters) {
   where.push('o.archived=?'); vals.push(filters.archived === 'true' || filters.archived === true);
   const search=String(filters.search||'').trim().toLowerCase();if(search.length>200) fail(400,'Recherche trop longue');
   const field=key=>driver.kind==='pg'?`c.data->>'${key}'`:`json_extract(c.data,'$.${key}')`;
-  where.push(`${field('clientType')}=?`);vals.push('ti');
+  where.push('EXISTS (SELECT 1 FROM primes p WHERE p.id=c.prime_id)');
   if(search){
     where.push(`(LOWER(o.titre) LIKE ? ESCAPE ? OR LOWER(${field('nom')}) LIKE ? ESCAPE ? OR LOWER(u.prenom) LIKE ? ESCAPE ? OR LOWER(u.nom) LIKE ? ESCAPE ?)`);
     const pattern=`%${search.replaceAll('\\','\\\\').replaceAll('%','\\%').replaceAll('_','\\_')}%`;
     for(let i=0;i<4;i++) vals.push(pattern,'\\');
   }
   // Aggregate only items belonging to each bounded batch; never read snapshots.
-  const joins=`FROM client_onboardings o JOIN clients c ON c.id=o.client_id LEFT JOIN users u ON u.id=o.technicien_id ${actor.role==='admin'?'':'JOIN prime_user_links l ON l.prime_id=c.prime_id'}`;
-  const criteria=`WHERE ${actor.role==='admin'?'':'l.user_id=? AND '}${where.join(' AND ')} AND ${provenClientSql(driver.kind==='pg')}`;
+  const joins='FROM client_onboardings o JOIN clients c ON c.id=o.client_id LEFT JOIN users u ON u.id=o.technicien_id';
+  const criteria=`WHERE ${where.join(' AND ')} AND ${provenClientSql(driver.kind==='pg')}`;
   const projection=`o.*,${field('nom')} AS client_nom,u.prenom AS tech_prenom,u.nom AS tech_nom,u.email AS technicien_email,
     (SELECT COUNT(*) FROM client_onboarding_items i WHERE i.onboarding_id=o.id) AS total_items,
     (SELECT COUNT(*) FROM client_onboarding_items i WHERE i.onboarding_id=o.id AND i.checked=?) AS completed_items,
     (SELECT COUNT(*) FROM client_onboarding_items i WHERE i.onboarding_id=o.id AND i.checked=? AND i.priorite IN ('Critique','Haute')) AS high_priority_open_items`;
-  const argumentsFor=(cursor,remaining)=>[true,false,...(actor.role==='admin'?[]:[actor.sub]),...vals,...(cursor===null?[]:[cursor]),remaining];
+  const argumentsFor=(cursor,remaining)=>[true,false,...vals,...(cursor===null?[]:[cursor]),remaining];
   const visible=[];
   let cursor=null;
   do {
@@ -326,23 +334,19 @@ async function listRows(driver,q,actor,filters) {
     // The candidate query takes no client locks: a descending onboarding page
     // can encounter B before A, whereas transfers always lock A before B.
     const candidates=await q(`SELECT o.id,o.client_id ${joins} ${criteria}${cursorSql} ORDER BY o.id DESC LIMIT ?`,
-      [...(actor.role==='admin'?[]:[actor.sub]),...vals,...(cursor===null?[]:[cursor]),remaining]);
+      [...vals,...(cursor===null?[]:[cursor]),remaining]);
     if(!candidates.length) break;
     cursor=candidates.at(-1).id;
     for(const clientId of [...new Set(candidates.map(r=>r.client_id))].sort((a,b)=>a-b))
       await q('SELECT id FROM clients WHERE id=? FOR SHARE',[clientId]);
-    if(actor.role!=='admin') {
-      const primes=await q(`SELECT DISTINCT prime_id FROM clients WHERE id IN (${candidates.map(()=>'?').join(',')})`,candidates.map(r=>r.client_id));
-      for(const primeId of [...new Set(primes.map(r=>r.prime_id))].sort((a,b)=>a-b))
-        await q('SELECT 1 FROM prime_user_links WHERE user_id=? AND prime_id=? FOR SHARE',[actor.sub,primeId]);
-    }
+
     const current=await q(`SELECT id,client_id FROM client_onboardings WHERE id IN (${candidates.map(()=>'?').join(',')}) ORDER BY id FOR SHARE`,candidates.map(r=>r.id));
     const original=new Map(candidates.map(r=>[r.id,r.client_id]));
     const stable=current.filter(r=>original.get(r.id)===r.client_id);
     if(stable.length) {
       const pairSql=stable.map(()=>'(?,?)').join(',');
       const records=await q(`SELECT ${projection} ${joins} ${criteria} AND (o.id,o.client_id) IN (${pairSql}) ORDER BY o.id DESC LIMIT ?`,
-        [true,false,...(actor.role==='admin'?[]:[actor.sub]),...vals,...stable.flatMap(r=>[r.id,r.client_id]),remaining]);
+        [true,false,...vals,...stable.flatMap(r=>[r.id,r.client_id]),remaining]);
       visible.push(...records);
     }
     if(candidates.length<remaining) break;
@@ -360,7 +364,7 @@ export async function reconcile(driver,key,actor) {
     const target=await row(q,'SELECT id,client_id,created_by_id FROM client_onboardings WHERE request_key=?',[key]);
     if (!target) return {found:false};
     if (target.created_by_id !== actor.sub) fail(404,'Prise en charge introuvable');
-    await scopedClient(q,target.client_id,actor,driver.kind==='pg');
+    await onboardingClient(q,target.client_id,driver.kind==='pg');
     const current=await row(q,'SELECT id,client_id,archived,created_by_id FROM client_onboardings WHERE request_key=?',[key]);
     if (!current || current.client_id!==target.client_id || current.created_by_id!==actor.sub) fail(404,'Prise en charge introuvable');
     await requireProvenClient(q,current.id,driver.kind==='pg');
@@ -372,7 +376,7 @@ export async function create(driver,data,items,actor,requestKey) {
   requireRequestKey(requestKey);
   const p=validate(data,items,true);
   return run(driver,async q=>{
-    await scopedClient(q,p.client_id,actor,driver.kind==='pg');await tech(q,p.technicien_id,actor);
+    await onboardingClient(q,p.client_id,driver.kind==='pg');await tech(q,p.technicien_id);
     const inserted=await row(q,`INSERT INTO client_onboardings (request_key,${columns.join(',')},data,created_by_id,created_by_email,updated_by_id,updated_by_email) VALUES (${Array(columns.length+6).fill('?').join(',')}) ON CONFLICT(request_key) DO NOTHING RETURNING *`,[requestKey,...values(p),JSON.stringify({}),actor.sub,actor.email,actor.sub,actor.email]);
     if (!inserted) fail(409,'Clé de requête déjà utilisée; vérifiez la création avant de réessayer');
     await writeItems(q,inserted.id,items);await history(q,inserted.id,'created',actor,await snapshot(q,inserted));
@@ -389,7 +393,8 @@ export async function mutate(driver,id,data,items,actor,event,expectedVersion) {
     // reassign this client, so no destination client lock is necessary.
     const target=await row(q,'SELECT client_id FROM client_onboardings WHERE id=?',[id]);if(!target) fail(404,'Prise en charge introuvable');
     if(driver.kind==='pg' && event==='updated') await q('SELECT id FROM clients WHERE id=? FOR UPDATE',[target.client_id]);
-    await scopedClient(q,target.client_id,actor,driver.kind==='pg');
+    if(event==='updated') await onboardingClient(q,target.client_id,driver.kind==='pg');
+    else await scopedClient(q,target.client_id,actor,driver.kind==='pg');
     const current=await row(q,`SELECT * FROM client_onboardings WHERE id=?${driver.kind==='pg'?' FOR UPDATE':''}`,[id]);if(!current) fail(404,'Prise en charge introuvable');
     if(current.client_id!==target.client_id) fail(404,'Prise en charge introuvable');
     await requireProvenClient(q,id,driver.kind==='pg');
@@ -398,7 +403,7 @@ export async function mutate(driver,id,data,items,actor,event,expectedVersion) {
     if(event==='updated' && current.statut==='Fait') fail(409,'Dossier terminé immuable');
     if(event==='updated' && archived(current.archived)) fail(409,'Archive immuable; restaurez-la avant modification');
     if(event==='updated'){
-      await tech(q,p.technicien_id,actor);
+      await tech(q,p.technicien_id);
       await q(`UPDATE client_onboardings SET ${columns.map(k=>`${k}=?`).join(',')},updated_by_id=?,updated_by_email=?,updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=?`,[...values(p),actor.sub,actor.email,id]);
       if(items!==undefined) await writeItems(q,id,items);
     } else {
