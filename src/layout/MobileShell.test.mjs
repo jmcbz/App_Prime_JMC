@@ -28,12 +28,13 @@ try {
   App = (await import(outfile)).default;
 } finally { await unlink(outfile).catch(() => {}); }
 
-async function mount(path = '/') {
+async function mount(path = '/', prepare = () => {}) {
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost/' });
   const previous = { window: globalThis.window, document: globalThis.document, navigator: globalThis.navigator, IS_REACT_ACT_ENVIRONMENT: globalThis.IS_REACT_ACT_ENVIRONMENT };
   globalThis.window = dom.window; globalThis.document = dom.window.document;
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  prepare(dom.window);
   const router = createMemoryRouter([{ path: '*', element: React.createElement(App) }], { initialEntries: [path] });
   const root = createRoot(dom.window.document.getElementById('root'));
   await act(async () => root.render(React.createElement(RouterProvider, { router })));
@@ -49,6 +50,83 @@ async function mount(path = '/') {
     get sidebar() { return dom.window.document.querySelector('#primary-navigation'); },
     get backdrop() { return dom.window.document.querySelector('[data-testid="navigation-backdrop"]'); } };
 }
+
+test('desktop sidebar collapses without unmounting content and can reopen accessibly', async () => {
+  const ui = await mount('/suivis');
+  try {
+    const toggle = ui.document.querySelector('button[aria-label="Réduire la barre latérale"]');
+    assert.ok(toggle, 'desktop collapse control exists');
+    const input = ui.document.querySelector('main input'); input.value = 'unsaved';
+    await ui.click(toggle);
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(toggle.getAttribute('aria-label'), 'Déployer la barre latérale');
+    assert.match(ui.sidebar.className, /sidebar-collapsed/);
+    assert.match(ui.document.querySelector('main').className, /md:ml-20/);
+    for (const link of ui.sidebar.querySelectorAll('nav a')) {
+      assert.ok(link.getAttribute('aria-label'));
+      assert.equal(link.title, link.getAttribute('aria-label'));
+      assert.ok(link.querySelector('svg'));
+    }
+    assert.equal(ui.document.querySelector('main input'), input);
+    assert.equal(input.value, 'unsaved');
+    await ui.click(toggle);
+    assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+    assert.match(ui.document.querySelector('main').className, /md:ml-64/);
+  } finally { await ui.close(); }
+});
+
+test('desktop preference is restored and persists only a local presentation flag', async () => {
+  const ui = await mount('/', window => window.localStorage.setItem('app-prime:sidebar-collapsed', 'true'));
+  try {
+    const toggle = ui.document.querySelector('.sidebar-toggle');
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    await ui.click(toggle);
+    assert.equal(ui.dom.window.localStorage.getItem('app-prime:sidebar-collapsed'), 'false');
+    await ui.click(toggle);
+    assert.equal(ui.dom.window.localStorage.getItem('app-prime:sidebar-collapsed'), 'true');
+  } finally { await ui.close(); }
+});
+
+test('blocked or invalid local storage never blocks navigation or toggling', async () => {
+  for (const prepare of [
+    window => window.localStorage.setItem('app-prime:sidebar-collapsed', 'invalid'),
+    window => Object.defineProperty(window, 'localStorage', { get() { throw new Error('blocked'); } }),
+    window => { window.Storage.prototype.setItem = () => { throw new Error('quota'); }; },
+  ]) {
+    const ui = await mount('/', prepare);
+    try {
+      const toggle = ui.document.querySelector('.sidebar-toggle');
+      assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+      await ui.click(toggle);
+      assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+      await ui.click(ui.sidebar.querySelector('a[href="/clients"]'));
+      assert.equal(ui.router.state.location.pathname, '/clients');
+    } finally { await ui.close(); }
+  }
+});
+
+test('collapsed rail retains Prime labels, excludes admin and preserves logout guards/errors', async () => {
+  const original = globalThis.__mobileShellAuth;
+  let logouts = 0;
+  globalThis.__mobileShellAuth = { ...original, user: { ...original.user, role: 'prime' }, logout: async () => { logouts++; throw new Error('fixture cleanup failure'); } };
+  const ui = await mount('/', window => window.localStorage.setItem('app-prime:sidebar-collapsed', 'true'));
+  try {
+    assert.equal(ui.sidebar.querySelector('a[href="/primes"]').getAttribute('aria-label'), 'Mon Prime');
+    assert.equal(ui.sidebar.querySelector('a[href="/administration"]'), null);
+    const logout = ui.sidebar.querySelector('button[aria-label="Se déconnecter"]');
+    const veto = event => event.preventDefault();
+    ui.dom.window.addEventListener('client-onboarding:before-logout', veto);
+    await ui.click(logout); assert.equal(logouts, 0);
+    ui.dom.window.removeEventListener('client-onboarding:before-logout', veto);
+    await ui.click(logout); assert.equal(logouts, 1);
+    assert.match(ui.sidebar.querySelector('[role="alert"]').textContent, /fixture cleanup failure/);
+    await ui.click(ui.menu);
+    assert.equal(ui.menu.getAttribute('aria-expanded'), 'true');
+    await ui.click(ui.sidebar.querySelector('a[href="/clients"]'));
+    assert.equal(ui.menu.getAttribute('aria-expanded'), 'false');
+    assert.equal(ui.document.querySelector('.sidebar-toggle').getAttribute('aria-expanded'), 'false');
+  } finally { await ui.close(); globalThis.__mobileShellAuth = original; }
+});
 
 test('mobile shell exposes full-width main and a closed, accessible navigation toggle', async () => {
   const ui = await mount('/suivis');

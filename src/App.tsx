@@ -1,6 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Loader2, Menu } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Sidebar from './layout/Sidebar';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -16,6 +16,15 @@ import type { ReactNode } from 'react';
 
 function ProtectedShell({ children }: { children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return window.localStorage.getItem('app-prime:sidebar-collapsed') === 'true'; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    // Presentation only; unavailable storage must not block the shell.
+    try { window.localStorage.setItem('app-prime:sidebar-collapsed', String(sidebarCollapsed)); }
+    catch { /* Keep the preference in memory for this session. */ }
+  }, [sidebarCollapsed]);
   const menuButton = useRef<HTMLButtonElement>(null);
   return (
     <div className="min-h-screen titan-grid">
@@ -30,8 +39,9 @@ function ProtectedShell({ children }: { children: ReactNode }) {
       {menuOpen && <button type="button" data-testid="navigation-backdrop" aria-label="Fermer le menu"
         className="fixed inset-0 z-40 bg-black/60 md:hidden" onClick={() => setMenuOpen(false)} />}
       <Sidebar mobileOpen={menuOpen} onClose={() => setMenuOpen(false)}
+        collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(value => !value)}
         onEscape={() => { setMenuOpen(false); menuButton.current?.focus(); }} />
-      <main className="min-h-screen min-w-0 md:ml-64">{children}</main>
+      <main className={`min-h-screen min-w-0 ${sidebarCollapsed ? 'md:ml-20' : 'md:ml-64'}`}>{children}</main>
     </div>
   );
 }

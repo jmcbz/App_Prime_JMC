@@ -13,6 +13,18 @@ body {
   color: #f1f5f9;
 }
 
+/* Desktop compact rail only: the mobile drawer always keeps its labels. */
+@media (min-width: 768px) {
+  .sidebar-collapsed { width: 5rem; }
+  .sidebar-collapsed .sidebar-label { display: none; }
+  .sidebar-collapsed .sidebar-brand { padding: 1rem 0 3.5rem; justify-content: center; }
+  .sidebar-collapsed .sidebar-toggle { top: auto; bottom: 0.5rem; right: 1.375rem; }
+  .sidebar-collapsed nav a { justify-content: center; padding-left: 0; padding-right: 0; }
+  .sidebar-collapsed .sidebar-footer { padding-left: 0.75rem; padding-right: 0.75rem; }
+  .sidebar-collapsed .sidebar-footer button { justify-content: center; }
+  .sidebar-collapsed [role="alert"] { overflow-wrap: anywhere; }
+}
+
 /* Grille de circuit subtile (clin d'œil Titans / tech) */
 .titan-grid {
   background-image:
