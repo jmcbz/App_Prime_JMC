@@ -37,6 +37,8 @@ async function mount(fetcher) {
   await act(async () => root.render(React.createElement(pages.AuthProvider, null, React.createElement(Probe))));
   const button = label => [...dom.window.document.querySelectorAll('button')].find(b => b.textContent.includes(label));
   const click = async b => { assert.ok(b); await act(async () => b.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))); };
+  // The new entry point is the portfolio; exercise the real client-opening action.
+  await click(button('Ouvrir Hôtel Château Laurier Québec'));
   const change = async (selector, value) => { const el = dom.window.document.querySelector(selector); assert.ok(el, selector); await act(async () => { el.value = value; Simulate.change(el, { target: { value } }); }); };
   const cleanup = async () => { await act(async () => root.unmount()); dom.window.close(); globalThis.window = previous.window; globalThis.document = previous.document; Object.defineProperty(globalThis, 'navigator', { configurable: true, value: previous.navigator }); globalThis.fetch = previous.fetch; globalThis.IS_REACT_ACT_ENVIRONMENT = previous.IS_REACT_ACT_ENVIRONMENT; };
   return { dom, button, click, change, cleanup, switchUser: async id => act(async () => setUser({ id, email: `user${id}@example.test`, prenom: 'User', nom: 'Test', role: 'admin', is_active: true })) };

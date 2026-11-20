@@ -9,7 +9,10 @@ import { createTableauSuivi, fetchTableauxSuivi, updateRubriqueSuivi,
   type TableauSuivi, type RubriqueKey, type RubriqueInput } from '../services/tableauxSuiviService';
 import { fetchSuivis, type StatutSuivi, type Suivi } from '../services/dataService';
 import { appendSuiviComplement, fetchSuiviComplements, type SuiviComplement } from '../services/suiviComplementsService';
-import SuivisBoard from './SuivisBoard';
+import SuivisBoard, { type ReportDraft } from './SuivisBoard';
+import SuivisPortfolio from './SuivisPortfolio';
+import { SuivisNavigationGuard, useSuivisDrafts } from './SuivisDrafts';
+import { SuivisArchiveDialog, SuivisArchives } from './SuivisArchives';
 
 const STATUTS: { value: StatutSuivi; label: string }[] = [
   { value: 'a_faire', label: 'À faire' }, { value: 'en_cours', label: 'En cours' },
@@ -17,7 +20,7 @@ const STATUTS: { value: StatutSuivi; label: string }[] = [
 ];
 const statutLabel = (value: StatutSuivi) => STATUTS.find(s => s.value === value)?.label ?? value;
 
-function AncienSuiviCard({ initial, onConfirmed }: { initial: Suivi; onConfirmed: (suivi: Suivi) => void }) {
+function AncienSuiviCard({ initial, onConfirmed, onDraftState }: { initial: Suivi; onConfirmed: (suivi: Suivi) => void; onDraftState?: ReportDraft }) {
   const [suivi, setSuivi] = useState(initial);
   const [open, setOpen] = useState(false);
   const [statut, setStatut] = useState<StatutSuivi>(initial.statut);
@@ -111,6 +114,8 @@ function AncienSuiviCard({ initial, onConfirmed }: { initial: Suivi; onConfirmed
     } finally { if (alive.current && version === mutationVersion.current) setRefreshing(false); }
   }
   const hasComplement = !!note.trim() || statut !== suivi.statut || (echeance || null) !== (suivi.echeance || null);
+  useEffect(()=>{onDraftState?.(`ancien:${initial.id}`,{dirty:hasComplement,busy:saving||refreshing});},[initial.id,hasComplement,saving,refreshing,onDraftState]);
+  useEffect(()=>()=>onDraftState?.(`ancien:${initial.id}`,null),[initial.id,onDraftState]);
   async function save() {
     if (pending.current || blocked || needsReview || suivi.statut === 'termine' || !hasComplement) return;
     pending.current = true;
@@ -202,20 +207,22 @@ function AncienSuiviCard({ initial, onConfirmed }: { initial: Suivi; onConfirmed
   </Card>;
 }
 
-function AnciensSuivis({ suivis, titre, identity, onConfirmed }: { suivis: Suivi[]; titre: string; identity: string; onConfirmed: (suivi: Suivi) => void }) {
+function AnciensSuivis({ suivis, titre, identity, onConfirmed, onDraftState }: { suivis: Suivi[]; titre: string; identity: string; onConfirmed: (suivi: Suivi) => void; onDraftState?: ReportDraft }) {
   return <section className="mt-5">
     <h3 className="mb-2 text-sm font-semibold text-slate-300">{titre}</h3>
     {suivis.length === 0 ? <p className="text-sm text-slate-500">Aucun ancien suivi.</p> :
-      <ul className="space-y-2">{suivis.map(s => <li key={`${identity}:${s.id}`}><AncienSuiviCard initial={s} onConfirmed={onConfirmed} /></li>)}</ul>}
+      <ul className="space-y-2">{suivis.map(s => <li key={`${identity}:${s.id}`}><AncienSuiviCard initial={s} onConfirmed={onConfirmed} onDraftState={onDraftState} /></li>)}</ul>}
   </section>;
 }
 
 export default function Suivis() {
+  const drafts=useSuivisDrafts();
   const { suivis, clients, primes, loading, error } = useMetier();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const [filtrePrime, setFiltrePrime] = useState('tous');
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [overview, setOverview] = useState(true);
   const [tableaux, setTableaux] = useState<TableauSuivi[]>([]);
   const [boardsLoading, setBoardsLoading] = useState(true);
   const [boardError, setBoardError] = useState('');
@@ -223,6 +230,8 @@ export default function Suivis() {
   const [confirmNew, setConfirmNew] = useState(false);
   const [creating, setCreating] = useState(false);
   const [creationUncertain, setCreationUncertain] = useState(false);
+  const savingRubrique=useRef(false);
+  useEffect(()=>{drafts.onDraftState('creation',{dirty:false,busy:creating});},[creating,drafts.onDraftState]);
   const [confirmed, setConfirmed] = useState<{ owner: number; items: Record<number, Suivi> } | null>(null);
   const onConfirmed = (owner: number | undefined, updated: Suivi) => {
     if (owner === undefined) return;
@@ -235,6 +244,7 @@ export default function Suivis() {
     setBoardError('');
   }
   async function retryBoards() {
+    if(!drafts.canLeave())return;
     setBoardsLoading(true);
     try { await refreshBoards(); setCreationUncertain(false); }
     catch (e) { setBoardError(e instanceof Error ? e.message : 'Erreur de synchronisation des tableaux'); }
@@ -279,15 +289,30 @@ export default function Suivis() {
     finally { setCreating(false); }
   }
   async function saveRubrique(tableauId: number, key: RubriqueKey, input: RubriqueInput) {
-    const updated = await updateRubriqueSuivi(tableauId, key, input);
-    setTableaux(previous => previous.map(t => t.id === updated.id ? updated : t));
+    if(savingRubrique.current)throw new Error('Une rubrique est en cours d’enregistrement. Réessayez après sa confirmation');
+    savingRubrique.current=true;
+    try {
+      const updated = await updateRubriqueSuivi(tableauId, key, input);
+      const target=tableaux.find(t=>t.id===tableauId);
+      const validRubriques=Array.isArray(updated?.rubriques) && updated.rubriques.every(r=>r &&
+        ['plan_directeur','projets','rencontre','comite_ti','backups','routeur','serveur_sur_place','vm_bz','ia_agentique'].includes(r.key) &&
+        ['a_faire','en_cours','bloque','termine'].includes(r.statut) &&
+        [r.date,r.note,r.prochaineAction,r.prochaineActionEcheance,r.version].every(value=>value===null || typeof value==='string'));
+      const returned=validRubriques?updated.rubriques.find(r=>r.key===key):undefined;
+      if(!target || updated?.id!==tableauId || updated.clientId!==target.clientId || updated.archivedAt!==null || !validRubriques ||
+        !returned || Object.entries(input).some(([field,value])=>returned[field as keyof RubriqueInput]!==value))throw new Error('Réponse de sauvegarde invalide');
+      setTableaux(previous => previous.map(t => t.id === updated.id ? updated : t));
+    } finally {savingRubrique.current=false;}
   }
 
   return <Page>
+    <SuivisNavigationGuard dirty={drafts.dirty} busy={drafts.busy} canLeave={drafts.canLeave} />
+    {drafts.busy && <p role="status" className="mb-3 text-sm text-titan-cyan">Enregistrement ou actualisation en cours · navigation temporairement verrouillée</p>}
+    {drafts.dirty && <p role="status" className="mb-3 text-sm text-amber-200">Modifications non enregistrées · sauvegardez chaque rubrique avant de quitter la fiche</p>}
     <PageHeader titre="Suivis" sousTitre="Tableaux de suivi par client et anciens suivis conservés avec compléments datés." />
     {isAdmin && <label className="mb-4 flex items-center gap-2 text-sm text-slate-300">
       Filtrer par Prime
-      <select aria-label="Filtrer par Prime" value={filtrePrime} onChange={e => { setFiltrePrime(e.target.value); setShowArchives(false); }} className="rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-white">
+      <select aria-label="Filtrer par Prime" value={filtrePrime} onChange={e => { if(!drafts.canLeave())return; setFiltrePrime(e.target.value); setShowArchives(false); }} className="rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-white">
         <option value="tous">Tous les Primes</option>
         {primes.map(p => <option key={p.id} value={String(p.id)}>{p.nom} · {p.codeTitan}</option>)}
         <option value="sans">Sans Prime</option>
@@ -295,49 +320,51 @@ export default function Suivis() {
     </label>}
     {(loading || boardsLoading) && <div className="flex items-center gap-2 py-6 text-sm text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /> Chargement…</div>}
     {(error || boardError) && <div role="alert" className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
+      {boardError && <strong className="block">Tableaux indisponibles — les priorités ne peuvent pas être confirmées.</strong>}
       {error || boardError}
       {boardError && <button type="button" onClick={() => void retryBoards()} className="ml-3 underline">Réessayer la synchronisation</button>}
     </div>}
     {!loading && !boardsLoading && !error && <>
+      {overview && boardError && <section aria-label="Anciens suivis disponibles" className="mb-5 rounded-xl border border-white/10 p-4">
+        <h2 className="font-semibold text-white">Les anciens suivis restent accessibles</h2>
+        <p className="mt-1 text-sm text-slate-400">Sans afficher de priorités calculées sur des tableaux indisponibles.</p>
+        <div className="mt-3 flex flex-wrap gap-2">{visibleClients.map(c=><button key={c.id} type="button" onClick={()=>{if(drafts.canLeave()){setSelectedId(c.id);setOverview(false);}}} className="rounded-lg border border-white/20 px-3 py-2 text-sm text-titan-cyan">Consulter les anciens suivis de {c.nom}</button>)}</div>
+      </section>}
+      {overview && !boardError && <SuivisPortfolio clients={visibleClients} tableaux={tableaux} suivis={visibleSuivis} onSelect={id=>{if(!drafts.canLeave())return;setSelectedId(id);setOverview(false);setShowArchives(false);}} />}
+      {overview && sansClient.length>0 && <AnciensSuivis onDraftState={drafts.onDraftState} identity={`${user?.id}:sans:${filtrePrime}`} titre="Anciens suivis sans client" suivis={sansClient} onConfirmed={updated=>onConfirmed(user?.id,updated)} />}
+      {!overview && <>
+      <button type="button" onClick={()=>{if(drafts.canLeave())setOverview(true);}} className="mb-4 rounded-lg border border-white/20 px-3 py-2 text-sm text-titan-cyan">← Vue d’ensemble des clients</button>
       {visibleClients.length > 0 ? <>
         <label className="mb-4 block text-sm text-slate-300">Client
-          <select aria-label="Client" value={clientId ?? ''} onChange={e => { setSelectedId(Number(e.target.value)); setShowArchives(false); }} className="mt-1 block w-full max-w-md rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-white">
+          <select aria-label="Client" value={clientId ?? ''} onChange={e => { if(!drafts.canLeave())return; setSelectedId(Number(e.target.value)); setShowArchives(false); }} className="mt-1 block w-full max-w-md rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-white">
             {visibleClients.map(c => <option key={c.id} value={c.id}>{c.nom}</option>)}
           </select>
         </label>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
           <h2 className="text-lg font-bold text-white">{client?.nom}</h2>
-          <button type="button" disabled={creating || creationUncertain || (!!boardError && !active)} onClick={() => active ? setConfirmNew(true) : void createBoard()} className="inline-flex items-center gap-2 rounded-xl bg-bz-blue px-3.5 py-2 text-sm font-semibold text-white hover:bg-bz-blue2 disabled:opacity-50">
+          <button type="button" disabled={creating || creationUncertain || (!!boardError && !active)} onClick={() => {if(drafts.canLeave()){if(active)setConfirmNew(true);else void createBoard();}}} className="inline-flex items-center gap-2 rounded-xl bg-bz-blue px-3.5 py-2 text-sm font-semibold text-white hover:bg-bz-blue2 disabled:opacity-50">
             <Plus className="h-4 w-4" /> {creating ? 'Création…' : 'Nouveau tableau'}
           </button>
         </div>
-        {active ? <SuivisBoard key={active.id} tableau={active} onSave={(key, input) => saveRubrique(active.id, key, input)} /> :
-          <Card className="mt-4 text-sm text-slate-400">Aucun tableau courant pour ce client. Créez-en un pour commencer.</Card>}
+        {active ? <SuivisBoard key={active.id} tableau={active} onDraftState={drafts.onDraftState} onSave={(key, input) => saveRubrique(active.id, key, input)} /> :
+          <Card className="mt-4 text-sm text-slate-400">{boardError?'Tableau indisponible — réessayez la synchronisation.':'Aucun tableau courant pour ce client. Créez-en un pour commencer.'}</Card>}
         {archives.length > 0 && <section className="mt-6">
           <button type="button" aria-expanded={showArchives} onClick={() => setShowArchives(v => !v)} className="text-sm font-semibold text-titan-cyan hover:text-white">Historique des tableaux ({archives.length}) {showArchives ? '−' : '+'}</button>
-          {showArchives && archives.map(t => <SuivisBoard key={t.id} tableau={t} onSave={async () => {}} />)}
+          {showArchives && <SuivisArchives key={clientId} archives={archives} />}
         </section>}
         <section className="mt-7 border-t border-white/10 pt-4" aria-label="Anciens suivis">
           <h2 className="text-lg font-bold text-white">Anciens suivis</h2>
           <p className="text-xs text-slate-400">Originaux conservés sans conversion ni suppression; les compléments s’ajoutent à l’historique.</p>
-          <AnciensSuivis key={`${user?.id}:${clientId}:${filtrePrime}`} identity={`${user?.id}:${clientId}:${filtrePrime}`} titre={`Suivis de ${client?.nom}`} suivis={anciensClient} onConfirmed={updated => onConfirmed(user?.id, updated)} />
-          {sansClient.length > 0 && <AnciensSuivis key={`${user?.id}:sans:${filtrePrime}`} identity={`${user?.id}:sans:${filtrePrime}`} titre="Sans client" suivis={sansClient} onConfirmed={updated => onConfirmed(user?.id, updated)} />}
+          <AnciensSuivis onDraftState={drafts.onDraftState} key={`${user?.id}:${clientId}:${filtrePrime}`} identity={`${user?.id}:${clientId}:${filtrePrime}`} titre={`Suivis de ${client?.nom}`} suivis={anciensClient} onConfirmed={updated => onConfirmed(user?.id, updated)} />
+          {sansClient.length > 0 && <AnciensSuivis onDraftState={drafts.onDraftState} key={`${user?.id}:sans:${filtrePrime}`} identity={`${user?.id}:sans:${filtrePrime}`} titre="Sans client" suivis={sansClient} onConfirmed={updated => onConfirmed(user?.id, updated)} />}
         </section>
       </> : <>
         <Card className="text-sm text-slate-400">Aucun client pour ce filtre.</Card>
         <section className="mt-7" aria-label="Anciens suivis"><h2 className="text-lg font-bold text-white">Anciens suivis</h2>
-          {sansClient.length > 0 && <AnciensSuivis key={`${user?.id}:sans:${filtrePrime}`} identity={`${user?.id}:sans:${filtrePrime}`} titre="Sans client" suivis={sansClient} onConfirmed={updated => onConfirmed(user?.id, updated)} />}</section>
+          {sansClient.length > 0 && <AnciensSuivis onDraftState={drafts.onDraftState} key={`${user?.id}:sans:${filtrePrime}`} identity={`${user?.id}:sans:${filtrePrime}`} titre="Sans client" suivis={sansClient} onConfirmed={updated => onConfirmed(user?.id, updated)} />}</section>
+      </>}
       </>}
     </>}
-    {confirmNew && <div role="dialog" aria-modal="true" aria-labelledby="archive-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-bz-dark2 p-5 shadow-titan">
-        <h2 id="archive-title" className="text-lg font-bold text-white">Archiver le tableau courant ?</h2>
-        <p className="mt-2 text-sm text-slate-300">Le tableau actuel de « {client?.nom} » sera archivé en lecture seule et un nouveau tableau vide sera créé.</p>
-        <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={() => setConfirmNew(false)} className="rounded-xl border border-white/10 px-4 py-2 text-sm text-white">Annuler</button>
-          <button type="button" disabled={creating} onClick={() => void createBoard()} className="rounded-xl bg-bz-blue px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{creating ? 'Création…' : 'Créer et archiver'}</button>
-        </div>
-      </div>
-    </div>}
+    {confirmNew && <SuivisArchiveDialog clientName={client?.nom ?? ''} busy={creating} onCancel={()=>setConfirmNew(false)} onConfirm={()=>void createBoard()} />}
   </Page>;
 }

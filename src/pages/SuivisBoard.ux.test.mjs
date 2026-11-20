@@ -31,6 +31,18 @@ async function mount(tableau, onSave = async () => {}) {
   return { document: dom.window.document, click, change, cleanup };
 }
 
+test('lecture compacte initiale avec statut puis édition explicite et brouillon signalé', async () => {
+  const ui = await mount(board([rubric('projets', {prochaineAction:'Appeler', prochaineActionEcheance:localDay(1)})]));
+  try {
+    const section=ui.document.querySelector('[data-rubrique="projets"]');
+    assert.equal(section.querySelector('button[aria-expanded]').getAttribute('aria-expanded'),'false');
+    assert.match(section.textContent,/Appeler/);
+    await ui.click(section.querySelector('button[aria-expanded]'));
+    await ui.change(section.querySelector('textarea[aria-label^="Note"]'),'Nouveau brouillon');
+    assert.match(section.textContent,/Modifications non enregistrées/);
+  } finally { await ui.cleanup(); }
+});
+
 test('une rubrique active enregistre une échéance distincte de sa date historique', async () => {
   let saved;
   const ui = await mount(board(), async (key, input) => { saved = { key, input }; });
@@ -81,13 +93,15 @@ test('les neuf rubriques se replient individuellement sans perdre les brouillons
     assert.equal(sections.length, 9);
     const first = sections[0];
     const toggle = first.querySelector('button[aria-expanded]');
-    assert.equal(toggle?.getAttribute('aria-expanded'), 'true');
+    assert.equal(toggle?.getAttribute('aria-expanded'), 'false');
+    await ui.click(toggle);
+    assert.equal(toggle.getAttribute('aria-expanded'), 'true');
     const note = first.querySelector('textarea[aria-label^="Note"]');
     await ui.change(note, 'Brouillon non sauvegardé');
     await ui.click(toggle);
     assert.equal(toggle.getAttribute('aria-expanded'), 'false');
     assert.equal(first.querySelector('form').hidden, true);
-    assert.equal(sections[1].querySelector('form').hidden, false);
+    assert.equal(sections[1].querySelector('form').hidden, true);
     await ui.click(toggle);
     assert.equal(first.querySelector('textarea[aria-label^="Note"]').value, 'Brouillon non sauvegardé');
   } finally { await ui.cleanup(); }

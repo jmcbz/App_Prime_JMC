@@ -44,9 +44,23 @@ test('le résumé suit le client et le filtre Prime sans exposer les actions des
   try {
     await act(async () => root.render(React.createElement(pages.AuthProvider, null, React.createElement(pages.Suivis))));
     const summary = () => dom.window.document.querySelector('[aria-label="Résumé du tableau courant"]');
+    assert.equal(!!summary(),false);
+    assert.ok(dom.window.document.querySelector('[aria-label="Vue d’ensemble des clients et priorités"]'));
+    const open=Array.from(dom.window.document.querySelectorAll('button')).find(b=>b.textContent.includes('Ouvrir Client Alpha'));
+    assert.ok(open);
+    await act(async()=>open.click());
     assert.match(summary().textContent, /Action Client Alpha/);
     assert.doesNotMatch(summary().textContent, /Action Client Bêta/);
+    const section=dom.window.document.querySelector('[data-rubrique="projets"]');
+    await act(async()=>section.querySelector('button[aria-expanded]').click());
+    const note=section.querySelector('textarea[aria-label^="Note"]');
+    await act(async()=>Simulate.change(note,{target:{value:'Brouillon conservé'}}));
+    dom.window.confirm=()=>false;
     const select = dom.window.document.querySelector('select[aria-label="Client"]');
+    await act(async () => { select.value = '3'; Simulate.change(select, { target: { value: '3' } }); });
+    assert.equal(dom.window.document.querySelector('select[aria-label="Client"]').value,'2');
+    assert.equal(note.value,'Brouillon conservé');
+    dom.window.confirm=()=>true;
     await act(async () => { select.value = '3'; Simulate.change(select, { target: { value: '3' } }); });
     assert.match(summary().textContent, /Action Client Bêta/);
     assert.doesNotMatch(summary().textContent, /Action Client Alpha/);
