@@ -1,3 +1,4 @@
+import { beginLoadPg, beginLoadSqlite, reconcilePg, reconcileSqlite } from './monthly-load.js';
 // Follow-up boards are independent of legacy suivis. An active board is unique per client.
 export const RUBRIQUES = Object.freeze([
   'plan_directeur', 'projets', 'rencontre', 'comite_ti', 'backups',
@@ -11,7 +12,7 @@ function shaped(row, rubriques) {
   return { id: row.id, clientId: row.client_id, createdAt: row.created_at,
     archivedAt: row.archived_at ?? null, rubriques: rubriques.map(r => ({
       key: r.key, statut: r.statut, date: r.date, note: r.note,
-      prochaineAction: r.prochaine_action, prochaineActionEcheance: r.prochaine_action_echeance, version: r.version,
+      prochaineActionDebut: r.prochaine_action_debut ?? null, prochaineAction: r.prochaine_action, prochaineActionEcheance: r.prochaine_action_echeance, version: r.version,
     })) };
 }
 function readOne(driver, id, connection = null) {
@@ -48,7 +49,8 @@ export async function createTableauForClient(driver, clientId, connection = null
   if (driver.kind === 'pg') {
     const tx = connection || await driver.pool.connect();
     try {
-      if (!connection) await tx.query('BEGIN');
+      let loadAt;
+      if (!connection) { await tx.query('BEGIN'); loadAt=await beginLoadPg(tx); }
       // Serializes replacements and transfers against this client's current ownership.
       const client = (await tx.query('SELECT prime_id FROM clients WHERE id = $1 FOR UPDATE', [clientId])).rows[0];
       if (!client) throw failure(404, 'Client introuvable');
@@ -62,12 +64,13 @@ export async function createTableauForClient(driver, clientId, connection = null
       }
       const id = await insertPg(tx, clientId);
       const board = await readOne(driver, id, tx);
-      if (!connection) await tx.query('COMMIT');
+      if (!connection) { await reconcilePg(tx,loadAt); await tx.query('COMMIT'); }
       return board;
     } catch (error) { if (!connection) await tx.query('ROLLBACK'); throw error; }
     finally { if (!connection) tx.release(); }
   }
   const run = () => {
+    const loadAt=beginLoadSqlite(driver.sqlite);
     const client = driver.sqlite.prepare('SELECT prime_id FROM clients WHERE id = ?').get(clientId);
     if (!client) throw failure(404, 'Client introuvable');
     if (userId !== null && !admin && !driver.sqlite.prepare(
@@ -78,7 +81,8 @@ export async function createTableauForClient(driver, clientId, connection = null
       const current = driver.sqlite.prepare('SELECT id FROM tableaux_suivi WHERE client_id = ? AND archived_at IS NULL').get(clientId);
       if ((current?.id ?? null) !== expectedActiveId) throw failure(409, 'Tableau modifié depuis son ouverture; rechargez les tableaux avant de réessayer');
     }
-    return readOne(driver, insertSqlite(driver, clientId));
+    const id=insertSqlite(driver, clientId); reconcileSqlite(driver.sqlite,loadAt);
+    return readOne(driver, id);
   };
   // Nested transactions are savepoints when called from the existing seed transaction.
   return driver.sqlite.transaction(run).immediate();
@@ -88,7 +92,7 @@ export async function backfillTableaux(driver) {
   if (driver.kind === 'pg') {
     const tx = await driver.pool.connect();
     try {
-      await tx.query('BEGIN');
+      await tx.query('BEGIN'); const loadAt=await beginLoadPg(tx);
       await tx.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-tableaux-backfill-v1'))");
       const rows = (await tx.query(`SELECT c.id FROM clients c WHERE NOT EXISTS
         (SELECT 1 FROM tableaux_suivi t WHERE t.client_id = c.id) ORDER BY c.id`)).rows;
@@ -99,14 +103,17 @@ export async function backfillTableaux(driver) {
           await tx.query('INSERT INTO tableau_rubriques (tableau_id, key) VALUES ($1,$2)', [inserted.rows[0].id, key]);
         }
       }
+      await reconcilePg(tx,loadAt);
       await tx.query('COMMIT');
     } catch (error) { await tx.query('ROLLBACK'); throw error; }
     finally { tx.release(); }
   } else {
     driver.sqlite.transaction(() => {
+      const loadAt=beginLoadSqlite(driver.sqlite);
       const rows = driver.sqlite.prepare(`SELECT c.id FROM clients c WHERE NOT EXISTS
         (SELECT 1 FROM tableaux_suivi t WHERE t.client_id = c.id) ORDER BY c.id`).all();
       for (const row of rows) insertSqlite(driver, row.id);
+      reconcileSqlite(driver.sqlite,loadAt);
     }).immediate();
   }
 }
@@ -117,7 +124,7 @@ export async function listTableaux(driver, userId, admin) {
   // One statement snapshots ownership and all rubric data together, even during a transfer.
   const sql = `SELECT t.*, r.key AS rubrique_key, r.statut AS rubrique_statut,
     r.date AS rubrique_date, r.note AS rubrique_note, r.prochaine_action AS rubrique_prochaine_action,
-    r.prochaine_action_echeance AS rubrique_prochaine_action_echeance,
+    r.prochaine_action_debut AS rubrique_prochaine_action_debut, r.prochaine_action_echeance AS rubrique_prochaine_action_echeance,
     r.version AS rubrique_version
     FROM tableaux_suivi t JOIN clients c ON c.id = t.client_id ${scope}
     JOIN tableau_rubriques r ON r.tableau_id = t.id ${where} ORDER BY t.client_id, t.id`;
@@ -130,7 +137,7 @@ export async function listTableaux(driver, userId, admin) {
     boards.get(row.id).rubriques.set(row.rubrique_key, {
       key: row.rubrique_key, statut: row.rubrique_statut, date: row.rubrique_date,
       note: row.rubrique_note, prochaine_action: row.rubrique_prochaine_action,
-      prochaine_action_echeance: row.rubrique_prochaine_action_echeance, version: row.rubrique_version,
+      prochaine_action_debut: row.rubrique_prochaine_action_debut, prochaine_action_echeance: row.rubrique_prochaine_action_echeance, version: row.rubrique_version,
     });
   }
   return [...boards.values()].map(({ row, rubriques }) => shaped(row, RUBRIQUES.map(key => rubriques.get(key))));
@@ -146,6 +153,7 @@ export function validateRubrique(key, input) {
   if (!RUBRIQUES.includes(key)) throw failure(400, 'Rubrique invalide');
   if (!input || !STATUTS.has(input.statut) ||
     (input.date !== null && !validCalendarDate(input.date)) ||
+    (input.prochaineActionDebut !== undefined && input.prochaineActionDebut !== null && !validCalendarDate(input.prochaineActionDebut)) ||
     (input.prochaineActionEcheance !== undefined && input.prochaineActionEcheance !== null &&
       !validCalendarDate(input.prochaineActionEcheance)) ||
     typeof input.note !== 'string' || typeof input.prochaineAction !== 'string' ||
@@ -161,7 +169,7 @@ export async function updateRubrique(driver, id, key, input, userId, admin) {
   if (driver.kind === 'pg') {
     const tx = await driver.pool.connect();
     try {
-      await tx.query('BEGIN');
+      await tx.query('BEGIN'); const loadAt=await beginLoadPg(tx);
       const target = (await tx.query('SELECT client_id FROM tableaux_suivi WHERE id = $1', [id])).rows[0];
       if (!target) throw failure(404, 'Tableau introuvable');
       // Same lock order as board replacement and client transfer: client, then board.
@@ -174,15 +182,18 @@ export async function updateRubrique(driver, id, key, input, userId, admin) {
       if (row.archived_at !== null) throw failure(409, 'Tableau archivé');
       await tx.query(`UPDATE tableau_rubriques SET statut=$1, date=$2, note=$3, prochaine_action=$4,
         prochaine_action_echeance=CASE WHEN $5=1 THEN $6 ELSE prochaine_action_echeance END,
+        prochaine_action_debut=CASE WHEN $10=1 THEN $11 ELSE prochaine_action_debut END,
         version=$7 WHERE tableau_id=$8 AND key=$9`,
-      [input.statut, input.date, input.note, input.prochaineAction, Number(hasEcheance), echeance, input.version, id, key]);
+      [input.statut, input.date, input.note, input.prochaineAction, Number(hasEcheance), echeance, input.version, id, key, Number(input.prochaineActionDebut !== undefined), input.prochaineActionDebut ?? null]);
       const board = await readOne(driver, id, tx);
+      await reconcilePg(tx,loadAt);
       await tx.query('COMMIT');
       return board;
     } catch (error) { await tx.query('ROLLBACK'); throw error; }
     finally { tx.release(); }
   }
   return driver.sqlite.transaction(() => {
+    const loadAt=beginLoadSqlite(driver.sqlite);
     const row = driver.sqlite.prepare(`SELECT t.archived_at, c.prime_id FROM tableaux_suivi t
       JOIN clients c ON c.id = t.client_id WHERE t.id = ?`).get(id);
     if (!row || (!admin && !driver.sqlite.prepare('SELECT 1 FROM prime_user_links WHERE user_id = ? AND prime_id = ?').get(userId, row.prime_id)))
@@ -190,8 +201,9 @@ export async function updateRubrique(driver, id, key, input, userId, admin) {
     if (row.archived_at !== null) throw failure(409, 'Tableau archivé');
     driver.sqlite.prepare(`UPDATE tableau_rubriques SET statut=?, date=?, note=?, prochaine_action=?,
       prochaine_action_echeance=CASE WHEN ?=1 THEN ? ELSE prochaine_action_echeance END,
-      version=? WHERE tableau_id=? AND key=?`).run(
-      input.statut, input.date, input.note, input.prochaineAction, Number(hasEcheance), echeance, input.version, id, key);
+      prochaine_action_debut=CASE WHEN ?=1 THEN ? ELSE prochaine_action_debut END, version=? WHERE tableau_id=? AND key=?`).run(
+      input.statut, input.date, input.note, input.prochaineAction, Number(hasEcheance), echeance, Number(input.prochaineActionDebut !== undefined), input.prochaineActionDebut ?? null, input.version, id, key);
+    reconcileSqlite(driver.sqlite,loadAt);
     return readOne(driver, id);
   }).immediate();
 }

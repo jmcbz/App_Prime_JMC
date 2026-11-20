@@ -3,6 +3,8 @@
  * Même philosophie que la flotte PRIsME BZ : PostgreSQL en production (DATABASE_URL présent),
  * SQLite (better-sqlite3) en développement local. Interface asynchrone unique.
  */
+import * as toolActivity from './tool-activity.js';
+import { beginLoadPg, beginLoadSqlite, loadLock, reconcilePg, reconcileSqlite, readTower, startLoadClock } from './monthly-load.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { migratePgMetier, checkSqliteMetierIdentity, migrateSqliteMetier, migrateSqliteRubriqueEcheance } from './metier-migration.js';
@@ -350,7 +352,7 @@ export async function createUserWithPrime({ email, passwordHash, prenom, nom, ro
   if (driver.kind === 'pg') {
     const connection = await driver.pool.connect();
     try {
-      await connection.query('BEGIN');
+      await connection.query('BEGIN'); await loadLock(connection);
       const result = await connection.query(
         `INSERT INTO users (email, password_hash, prenom, nom, role)
          VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -398,7 +400,7 @@ export async function linkExistingUserToPrime(userId, primeId) {
   if (driver.kind === 'pg') {
     const connection = await driver.pool.connect();
     try {
-      await connection.query('BEGIN');
+      await connection.query('BEGIN'); await loadLock(connection);
       const user = await connection.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
       const prime = await connection.query('SELECT id FROM primes WHERE id = $1 FOR KEY SHARE', [primeId]);
       if (!user.rowCount || !prime.rowCount) throw fail(404, 'Usager ou Prime introuvable');
@@ -426,7 +428,7 @@ export async function seedAdminIfNone({ email, passwordHash, prenom, nom }) {
   if (driver.kind === 'pg') {
     const connection = await driver.pool.connect();
     try {
-      await connection.query('BEGIN');
+      await connection.query('BEGIN'); await loadLock(connection);
       await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-admin-seed-v1'))");
       const existing = await connection.query(
         "SELECT 1 FROM users WHERE (role = 'admin' AND is_active = true) OR LOWER(email) = $1 LIMIT 1", [key],
@@ -571,6 +573,7 @@ function legacyValues(table, data) {
 
 /** Insère une ligne {data, <fk>} et relit (SQLite/PG). */
 async function insertJsonRow(table, data, fks = {}, connection = null) {
+  if (driver.kind==='pg' && !connection) return loadMutationPg(tx=>insertJsonRow(table,data,fks,tx));
   const json = JSON.stringify(data || {});
   const fields = { ...fks, data: json, ...legacyValues(table, data) };
   const cols = Object.keys(fields);
@@ -582,15 +585,20 @@ async function insertJsonRow(table, data, fks = {}, connection = null) {
     );
     return r.rows[0];
   }
+  return driver.sqlite.transaction(() => {
+  const loadAt=beginLoadSqlite(driver.sqlite);
   const sqliteCols = [...cols, 'updated_at'];
   const info = driver.sqlite.prepare(
     `INSERT INTO ${table} (${sqliteCols.join(',')}) VALUES (${cols.map(() => '?').join(',')},datetime('now'))`
   ).run(...values);
+  reconcileSqlite(driver.sqlite,loadAt);
   return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid);
+  }).immediate();
 }
 
 /** Met à jour data + fks et relit. */
-async function updateJsonRow(table, id, data, fks = {}) {
+async function updateJsonRow(table, id, data, fks = {}, connection=null) {
+  if(driver.kind==='pg' && !connection) return loadMutationPg(tx=>updateJsonRow(table,id,data,fks,tx));
   const json = JSON.stringify(data || {});
   const fields = { data: json, ...fks, ...legacyValues(table, data) };
   const cols = Object.keys(fields);
@@ -599,21 +607,30 @@ async function updateJsonRow(table, id, data, fks = {}) {
     const sets = [...cols.map((c, i) =>
       `${c} = $${i + 1}${c === 'data' || c === 'specialites' ? '::jsonb' : ''}`),
       'updated_at = CURRENT_TIMESTAMP'];
-    const r = await driver.pool.query(
+    const r = await connection.query(
       `UPDATE ${table} SET ${sets.join(', ')} WHERE id = $${cols.length + 1} RETURNING *`,
       [...values, id]
     );
     return r.rows[0] || null;
   }
+  return driver.sqlite.transaction(() => {
+  const loadAt=beginLoadSqlite(driver.sqlite);
   const sets = [...cols.map(c => `${c} = ?`), "updated_at = datetime('now')"];
   driver.sqlite.prepare(`UPDATE ${table} SET ${sets.join(', ')} WHERE id = ?`)
     .run(...values, id);
+  reconcileSqlite(driver.sqlite,loadAt);
   return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) || null;
+  }).immediate();
 }
 
+async function loadMutationPg(fn) {
+ const tx=await driver.pool.connect();
+ try {await tx.query('BEGIN');const loadAt=await beginLoadPg(tx);const result=await fn(tx);await reconcilePg(tx,loadAt);await tx.query('COMMIT');return result;}
+ catch(e){await tx.query('ROLLBACK');throw e;}finally{tx.release();}
+}
 async function deleteRow(table, id) {
-  if (driver.kind === 'pg') await driver.pool.query(`DELETE FROM ${table} WHERE id = $1`, [id]);
-  else driver.sqlite.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+  if (driver.kind === 'pg') await loadMutationPg(tx=>tx.query(`DELETE FROM ${table} WHERE id = $1`, [id]));
+  else driver.sqlite.transaction(()=>{const loadAt=beginLoadSqlite(driver.sqlite);driver.sqlite.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);reconcileSqlite(driver.sqlite,loadAt);}).immediate();
 }
 
 async function selectAll(table, orderBy) {
@@ -678,7 +695,7 @@ export async function deletePrime(id) {
     }
     const tx = await driver.pool.connect();
     try {
-      await tx.query('BEGIN');
+      await tx.query('BEGIN'); await loadLock(tx);
       const present = (await tx.query('SELECT id FROM primes WHERE id = $1 FOR UPDATE', [id])).rows[0];
       if (present) {
         const history = await tx.query('SELECT 1 FROM suivis WHERE prime_id = $1 LIMIT 1', [id]);
@@ -750,7 +767,7 @@ export async function createClient(input, connection = null) {
     }
     const tx = await driver.pool.connect();
     try {
-      await tx.query('BEGIN');
+      await tx.query('BEGIN'); await loadLock(tx);
       const client = await createClient(input, tx);
       await tx.query('COMMIT');
       return client;
@@ -767,6 +784,15 @@ export async function createClient(input, connection = null) {
     return normalizeClient(row);
   }).immediate();
 }
+
+export async function toolFeed(actor) { return toolActivity.feed(driver,actor); }
+export async function recordToolOpen(actor,module,id) { return toolActivity.recordOpen(driver,actor,module,id); }
+export async function primeProfiles(actor) {
+ const tower=await readTower(driver,actor);
+ return tower.primes.map(p=>({id:p.id,nom:p.nom,codeTitan:p.codeTitan,specialites:p.specialites,avatarInitiales:p.avatarInitiales,disponibilite:p.manualAvailability,effectiveAvailability:p.effectiveAvailability,autoCharge:p.autoCharge,monthlyCount:p.monthlyCount}));
+}
+export async function controlTower(actor, now) { return readTower(driver,actor,now); }
+export async function initializeLoadClock() { await readTower(driver); return startLoadClock(driver); }
 
 export async function listTableaux(userId, admin) { return listTableauxRows(driver, userId, admin); }
 export async function createTableau(clientId, userId, admin, expectedActiveId) { return createTableauForClient(driver, clientId, null, userId, admin, expectedActiveId); }
@@ -796,18 +822,20 @@ export async function updateClient(id, input, expected) {
   };
   if (driver.kind === 'sqlite') {
     return driver.sqlite.transaction(() => {
+      const loadAt=beginLoadSqlite(driver.sqlite);
       const row = driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(id);
       if (!row) return null;
       const fields = update(row);
       const keys = Object.keys(fields);
       driver.sqlite.prepare(`UPDATE clients SET ${keys.map((key) => `${key} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
         .run(...Object.values(fields), id);
+      reconcileSqlite(driver.sqlite,loadAt);
       return normalizeClient(driver.sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(id));
     }).immediate();
   }
   const connection = await driver.pool.connect();
   try {
-    await connection.query('BEGIN');
+    await connection.query('BEGIN'); const loadAt=await beginLoadPg(connection);
     await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-servo-portfolio-v1'))");
     const row = (await connection.query('SELECT * FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (!row) { await connection.query('ROLLBACK'); return null; }
@@ -818,6 +846,7 @@ export async function updateClient(id, input, expected) {
     const fields = update(row);
     const keys = Object.keys(fields), values = Object.values(fields);
     const updated = (await connection.query(`UPDATE clients SET ${keys.map((key, i) => `${key} = $${i + 1}${key === 'data' ? '::jsonb' : ''}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${keys.length + 1} RETURNING *`, [...values, id])).rows[0];
+    await reconcilePg(connection,loadAt);
     await connection.query('COMMIT');
     return normalizeClient(updated);
   } catch (error) {
@@ -860,7 +889,7 @@ export async function deleteClient(id) {
   }
   const tx = await driver.pool.connect();
   try {
-    await tx.query('BEGIN');
+    await tx.query('BEGIN'); await loadLock(tx);
     const present = (await tx.query('SELECT id FROM clients WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (present) {
       const history = await tx.query('SELECT 1 FROM tableaux_suivi WHERE client_id = $1 UNION SELECT 1 FROM suivis WHERE client_id = $1 UNION SELECT 1 FROM client_onboardings WHERE client_id = $1 UNION SELECT 1 FROM workstation_templates WHERE client_id = $1 UNION SELECT 1 FROM workstation_dossiers WHERE client_id = $1 LIMIT 1', [id]);
@@ -945,6 +974,7 @@ async function seedMetierBody() {
   const execute = sql => connection ? connection.query(sql) : driver.sqlite.exec(sql);
   try {
     await execute(connection ? 'BEGIN' : 'BEGIN IMMEDIATE');
+    if (connection) await loadLock(connection);
     if (connection) await execute("SELECT pg_advisory_xact_lock(hashtext('app-prime-metier-seed-v1'))");
     if ((await countRows('primes', connection)) > 0 ||
         (await countRows('clients', connection)) > 0 ||

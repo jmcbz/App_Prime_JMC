@@ -46,6 +46,7 @@ function fixture({dossiers=[],templates=[template],putStatus=200,browserRouter=f
     const method=options.method||'GET'; const body=options.body&&JSON.parse(options.body);
     requests.push({url,method,body});
     const custom=override?.({url,method,body,requests});if(custom!==undefined)return custom;
+    if(url==='/api/tool-activity'&&method==='POST')return Response.json({recorded:true,module:body.module,id:body.id,openedAt:'2026-11-20T12:00:00Z'});
     if(url==='/api/clients')return Response.json({clients:[{id:2,nom:'Acme TI',clientType:'ti',primeId:1},{id:4,nom:'Télécom',clientType:'telecom',primeId:1},{id:5,nom:'À classer',clientType:null,primeId:1},{id:6,nom:'Sans Prime',clientType:'ti',primeId:null}]});
     if(url==='/api/workstation-procedures/templates/standard')return Response.json({template:{...template,id:30,clientId:null,name:'Gabarit Windows'}});
     if(url.startsWith('/api/workstation-procedures/audit-source?'))return Response.json({client:{id:2,nom:'Acme TI'},template});
@@ -76,7 +77,7 @@ test('client procedure drives both exports even with an unrelated historical dos
   try{await f.render();f.dom.window.confirm=()=>true;await f.input('Client','2');await f.input('Modèle','7');await f.click('Ouvrir Alice · Acme TI');
     await f.click('Télécharger la procédure HTML');assert.ok(blob);const html=await new Promise(resolve=>{const r=new f.dom.window.FileReader();r.onload=()=>resolve(r.result);r.readAsText(blob);});assert.match(html,/CLIENT-GENERAL/);assert.doesNotMatch(html,/Alice|PC-1|T-1/);
     await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(globalThis.__scriptConfig.procedure.name,saved.name);assert.deepEqual(globalThis.__scriptConfig.procedure.sections,saved.sections);
-    assert.equal(f.requests.filter(r=>r.url.includes('/audit-source?clientId=2&templateId=7')).length,2);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source/dossier/')));assert.ok(!f.requests.some(r=>r.method!=='GET'));
+    assert.equal(f.requests.filter(r=>r.url.includes('/audit-source?clientId=2&templateId=7')).length,2);assert.ok(!f.requests.some(r=>r.url.includes('/audit-source/dossier/')));assert.ok(!f.requests.some(r=>r.method!=='GET'&&r.url!=='/api/tool-activity'));
     assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'7');
     assert.equal(f.dom.window.document.querySelector('[aria-label="Commentaire — Clavier"]').disabled,true);
     assert.doesNotMatch(f.dom.window.document.body.textContent,/Créer le dossier|Nouveau dossier/);
@@ -100,7 +101,7 @@ test('duplication prefills selected client and refused A-to-B navigation keeps r
  assert.equal(f.dom.window.document.querySelector('[aria-label="Client du modèle"]').value,'2');
  await f.input('Note étape 1.1','KEEP-CLIENT-DRAFT');f.dom.window.confirm=()=>false;await f.input('Client','');
  assert.equal(f.dom.window.document.querySelector('[aria-label="Client"]').value,'2');
- assert.equal(f.dom.window.document.querySelector('[aria-label="Note étape 1.1"]').value,'KEEP-CLIENT-DRAFT');assert.ok(!f.requests.some(r=>r.method!=='GET'));
+ assert.equal(f.dom.window.document.querySelector('[aria-label="Note étape 1.1"]').value,'KEEP-CLIENT-DRAFT');assert.ok(!f.requests.some(r=>r.method!=='GET'&&r.url!=='/api/tool-activity'));
  }finally{await f.cleanup();}
 });
 
@@ -398,7 +399,7 @@ test('new client procedure saves through templates, reads its receipt, and expor
 test('historical active dossiers are immutable consultation; opening one preserves unsaved general procedure and blocks both exports',async()=>{
  const before=JSON.stringify(dossier);const f=fixture({dossiers:[dossier]});try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Titre étape 1.1','UNSAVED-GENERAL');await f.click('Ouvrir Alice · Acme TI');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'UNSAVED-GENERAL');
  assert.ok([...f.dom.window.document.querySelectorAll('.workstation-print-control')].every(e=>e.disabled));assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]').value,'Alice');assert.equal(f.dom.window.document.querySelector('[aria-label="Employé"]').disabled,true);
- await captureDownloads(f,async({blobs})=>{await f.click('Télécharger la procédure HTML');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(blobs.length,0);});assert.equal(JSON.stringify(dossier),before);assert.ok(f.requests.every(r=>r.method==='GET'));assert.doesNotMatch(f.dom.window.document.body.textContent,/Sauvegarder le dossier|Archiver le dossier/);
+ await captureDownloads(f,async({blobs})=>{await f.click('Télécharger la procédure HTML');await f.click('Télécharger la trousse d’audit (.zip)');assert.equal(blobs.length,0);});assert.equal(JSON.stringify(dossier),before);assert.ok(f.requests.every(r=>r.method==='GET'||r.method==='POST'&&r.url==='/api/tool-activity'));assert.doesNotMatch(f.dom.window.document.body.textContent,/Sauvegarder le dossier|Archiver le dossier/);
  }finally{await f.cleanup();}
 });
 
@@ -429,7 +430,7 @@ test('400 pending-template cleanup failure blocks new keys and keeps corrected d
 
 test('delayed legacy dossier receipt reconciles history without replacing selected client procedure or its unsaved edits',async()=>{
  const seed={kind:'dossier',payload:{requestKey:'9ecb3330-166b-4c93-9cd8-fce998336399',clientId:2,templateId:3,employee:'Legacy',computer:'',ticket:'',date:'2026-11-09'}};let release;const gate=new Promise(r=>release=r);const f=fixture({pendingSeed:seed,override:({url})=>url.includes('/dossiers/by-request/')?gate.then(()=>Response.json({dossier:{...dossier,id:12,employee:'Legacy'}})):undefined});
- try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Titre étape 1.1','NEW GENERAL DRAFT');await act(async()=>release());assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'3');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'NEW GENERAL DRAFT');assert.match(f.dom.window.document.body.textContent,/Ouvrir Legacy/);assert.ok(f.requests.every(r=>r.method==='GET'));}finally{release();await f.cleanup();}
+ try{await f.render();await f.input('Client','2');await f.input('Modèle','3');await f.input('Titre étape 1.1','NEW GENERAL DRAFT');await act(async()=>release());assert.equal(f.dom.window.sessionStorage.length,0);assert.equal(f.dom.window.document.querySelector('[aria-label="Modèle"]').value,'3');assert.equal(f.dom.window.document.querySelector('[aria-label="Titre étape 1.1"]').value,'NEW GENERAL DRAFT');assert.match(f.dom.window.document.body.textContent,/Ouvrir Legacy/);assert.ok(f.requests.every(r=>r.method==='GET'||r.method==='POST'&&r.url==='/api/tool-activity'));}finally{release();await f.cleanup();}
 });
 
 test('unsaved general procedure vetoes logout, external download navigation and survives BrowserRouter history for the same account only',async()=>{
@@ -440,7 +441,7 @@ test('unsaved general procedure vetoes logout, external download navigation and 
 
 test('current denied pending receipt conceals clients while retaining the original recovery key',async()=>{
  const seed={kind:'template',payload:{requestKey:'9ecb3330-166b-4c93-9cd8-fce998336399',clientId:2,name:'Original',sections:template.sections}};
- for(const status of [401,403]){const f=fixture({pendingSeed:seed,override:({url})=>url.includes('/templates/by-request/')?Response.json({error:'Denied'},{status}):undefined});try{await f.render();assert.doesNotMatch(f.dom.window.document.body.textContent,/Acme TI|Standard Windows/);assert.deepEqual(JSON.parse(f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1')),seed);assert.ok(f.requests.every(r=>r.method==='GET'));}finally{await f.cleanup();}}
+ for(const status of [401,403]){const f=fixture({pendingSeed:seed,override:({url})=>url.includes('/templates/by-request/')?Response.json({error:'Denied'},{status}):undefined});try{await f.render();assert.doesNotMatch(f.dom.window.document.body.textContent,/Acme TI|Standard Windows/);assert.deepEqual(JSON.parse(f.dom.window.sessionStorage.getItem('workstation-procedures:pending-create:1')),seed);assert.ok(f.requests.every(r=>r.method==='GET'||r.method==='POST'&&r.url==='/api/tool-activity'));}finally{await f.cleanup();}}
 });
 
 

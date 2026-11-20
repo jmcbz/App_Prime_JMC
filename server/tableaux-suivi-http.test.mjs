@@ -49,7 +49,7 @@ function blank(board, clientId) {
   assert.ok(board.createdAt);
   assert.deepEqual(board.rubriques.map(r => r.key), keys);
   for (const rubrique of board.rubriques) assert.deepEqual(rubrique, {
-    key: rubrique.key, statut: 'a_faire', date: null, note: '', prochaineAction: '', prochaineActionEcheance: null, version: null,
+    key: rubrique.key, statut: 'a_faire', date: null, note: '', prochaineAction: '', prochaineActionDebut:null, prochaineActionEcheance: null, version: null,
   });
 }
 
@@ -115,7 +115,7 @@ test('boards: bootstrap, authorization, replacement, immutable history, transfer
     const payload = { statut:'en_cours', date:'2026-11-06', note:'Routeur vérifié', prochaineAction:'Suivi prévu', prochaineActionEcheance:'2026-12-15', version:'7.4' };
     const changed = await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,payload);
     assert.equal(changed.status,200);
-    assert.deepEqual(changed.data.tableau.rubriques.find(r=>r.key==='routeur'),{key:'routeur',...payload});
+    assert.deepEqual(changed.data.tableau.rubriques.find(r=>r.key==='routeur'),{key:'routeur',prochaineActionDebut:null,...payload});
     for (const date of ['2026-02-29','2026-13-01','2026-04-31','2026-12-1','']) {
       assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,
         {...payload,prochaineActionEcheance:date})).status,400);
@@ -151,7 +151,7 @@ test('boards: bootstrap, authorization, replacement, immutable history, transfer
     assert.equal(history.length,3);
     assert.equal(history.filter(t=>t.archivedAt===null).length,1);
     assert.equal(history.find(t=>t.id===createdBoard.id).rubriques.find(r=>r.key==='routeur').note,payload.note);
-    assert.deepEqual(history.find(t=>t.id===createdBoard.id).rubriques.find(r=>r.key==='routeur'),{key:'routeur',...payload});
+    assert.deepEqual(history.find(t=>t.id===createdBoard.id).rubriques.find(r=>r.key==='routeur'),{key:'routeur',prochaineActionDebut:null,...payload});
     assert.ok(history.find(t=>t.id===createdBoard.id).archivedAt);
     assert.equal((await call('PUT',`/api/tableaux-suivi/${createdBoard.id}/rubriques/routeur`,aToken,payload)).status,409);
     const current=history.find(t=>t.archivedAt===null);

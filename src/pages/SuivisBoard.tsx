@@ -20,6 +20,7 @@ function RubriqueRow({ tableau, definition, onSave, expanded, onToggle, onDraftS
   const initial: RubriqueInput = {
     statut: saved?.statut ?? 'a_faire', date: saved?.date ?? null,
     note: saved?.note ?? '', prochaineAction: saved?.prochaineAction ?? '',
+    prochaineActionDebut: saved?.prochaineActionDebut ?? null,
     prochaineActionEcheance: saved?.prochaineActionEcheance ?? null,
     version: 'version' in definition ? saved?.version ?? '' : null,
   };
@@ -49,12 +50,12 @@ function RubriqueRow({ tableau, definition, onSave, expanded, onToggle, onDraftS
     <div className="mb-3 grid min-w-0 gap-2 text-sm sm:grid-cols-[8rem_minmax(0,1fr)_10rem]">
       <div><SuiviBadge statut={initial.statut} /></div>
       <p className="min-w-0 whitespace-pre-wrap break-words text-slate-300">{initial.prochaineAction || 'Aucune prochaine action renseignée'}</p>
-      <p className="text-slate-400">{initial.prochaineActionEcheance || 'Sans échéance'}</p>
+      <div className="text-slate-400"><p>Date de départ : {initial.prochaineActionDebut || '—'}</p><p>Échéance : {initial.prochaineActionEcheance || '—'}</p></div>
     </div>
     {dirty && <p role="status" className="mb-2 text-xs text-amber-200">Modifications non enregistrées</p>}
     {notice && !dirty && <p role="status" className="mb-2 text-xs text-emerald-300">{notice}</p>}
     {tableau.archivedAt ? <div id={`rubrique-${tableau.id}-${definition.key}`} hidden={!expanded} className="min-w-0 space-y-2 whitespace-pre-wrap break-words text-sm text-slate-300">
-      <p>Date : {initial.date || '—'}</p><p>Note : {initial.note || '—'}</p>
+      <p>Date du suivi / de la visite : {initial.date || '—'}</p><p>Date de départ : {initial.prochaineActionDebut || '—'}</p><p>Note : {initial.note || '—'}</p>
       <p>Échéance de la prochaine action : {initial.prochaineActionEcheance || '—'}</p>
       {'version' in definition && <p>Version : {initial.version || '—'}</p>}
     </div> : <form id={`rubrique-${tableau.id}-${definition.key}`} hidden={!expanded} onSubmit={async e => {
@@ -67,10 +68,11 @@ function RubriqueRow({ tableau, definition, onSave, expanded, onToggle, onDraftS
     }}>
       <fieldset disabled={busy} className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <label className="text-xs text-slate-300">Statut<select aria-label={`Statut — ${definition.label}`} value={draft.statut} onChange={e=>change('statut',e.target.value)} className={inputClass}>{STATUTS.map(s=><option key={s.value} value={s.value}>{s.label}</option>)}</select></label>
-        <label className="text-xs text-slate-300">Date du suivi (distincte de l’échéance)<input aria-label={`Date — ${definition.label}`} type="date" value={draft.date ?? ''} onChange={e=>change('date',e.target.value || null)} className={inputClass} /></label>
+        <label className="text-xs text-slate-300">Date du suivi / de la visite<input aria-label={`Date — ${definition.label}`} type="date" value={draft.date ?? ''} onChange={e=>change('date',e.target.value || null)} className={inputClass} /></label>
         {'version' in definition && <label className="text-xs text-slate-300">Version<input aria-label={`Version — ${definition.label}`} value={draft.version ?? ''} onChange={e=>change('version',e.target.value)} className={inputClass} /></label>}
         <label className="text-xs text-slate-300">Note<textarea aria-label={`Note — ${definition.label}`} rows={3} value={draft.note ?? ''} onChange={e=>change('note',e.target.value)} className={inputClass} /></label>
         <label className="text-xs text-slate-300">Prochaine action<textarea aria-label={`Prochaine action — ${definition.label}`} rows={3} value={draft.prochaineAction ?? ''} onChange={e=>change('prochaineAction',e.target.value)} className={inputClass} /></label>
+        <label className="text-xs text-slate-300">Date de départ<input aria-label={`Date de départ — ${definition.label}`} type="date" value={draft.prochaineActionDebut ?? ''} onChange={e=>change('prochaineActionDebut',e.target.value || null)} className={inputClass} /></label>
         <label className="text-xs text-slate-300">Échéance de la prochaine action<input aria-label={`Échéance de la prochaine action — ${definition.label}`} type="date" value={draft.prochaineActionEcheance ?? ''} onChange={e=>change('prochaineActionEcheance',e.target.value || null)} className={inputClass} /></label>
       </fieldset>
       <div className="mt-3 flex flex-wrap items-center gap-3">

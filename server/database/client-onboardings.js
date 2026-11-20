@@ -130,7 +130,7 @@ function adapter(driver, connection) {
 }
 async function transaction(driver, fn) {
   const conn=await driver.pool.connect();
-  try { await conn.query('BEGIN'); const result=await fn(adapter(driver,conn)); await conn.query('COMMIT'); return result; }
+  try { await conn.query('BEGIN'); await conn.query('SELECT pg_advisory_xact_lock(176930415, 20261120)'); const result=await fn(adapter(driver,conn)); await conn.query('COMMIT'); return result; }
   catch(e) { await conn.query('ROLLBACK'); throw e; }
   finally { conn.release(); }
 }
@@ -145,7 +145,7 @@ async function run(driver, fn) {
 const row = async (q,sql,vals) => (await q(sql,vals))[0];
 // Creation and every later event must identify this exact dossier/client.
 // JSON array guards keep corrupt SQLite TEXT and non-array JSON fail-closed.
-function provenClientSql(pg) {
+export function provenClientSql(pg) {
   const matches=pg
     ? `h.snapshot->'onboarding'->'client_id' = to_jsonb(o.client_id)
        AND h.snapshot->'onboarding'->'id' = to_jsonb(o.id)

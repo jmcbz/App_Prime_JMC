@@ -106,7 +106,8 @@ export default function Primes() {
                       <div className="text-xs font-medium text-titan-cyan">Code Titan · {p.codeTitan}</div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <DispoPastille dispo={p.disponibilite} />
+                      <DispoPastille dispo={p.effectiveAvailability ?? p.disponibilite} />
+                      {p.monthlyCount !== undefined && <span className="text-xs text-slate-400">{p.monthlyCount} tâches ce mois{p.autoCharge ? ' · charge automatique' : ''}</span>}
                       {isAdmin && (
                         <div className="flex gap-1">
                           <button onClick={() => ouvrirEdition(p)} title="Modifier"

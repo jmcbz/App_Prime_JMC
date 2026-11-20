@@ -221,8 +221,8 @@ export default function Suivis() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const [filtrePrime, setFiltrePrime] = useState('tous');
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [overview, setOverview] = useState(true);
+  const [selectedId, setSelectedId] = useState<number | null>(()=>{const raw=new URLSearchParams(window.location.search).get('client');return raw && /^[1-9]\d*$/.test(raw)&&Number.isSafeInteger(Number(raw))?Number(raw):null;});
+  const [overview, setOverview] = useState(selectedId===null);
   const [tableaux, setTableaux] = useState<TableauSuivi[]>([]);
   const [boardsLoading, setBoardsLoading] = useState(true);
   const [boardError, setBoardError] = useState('');

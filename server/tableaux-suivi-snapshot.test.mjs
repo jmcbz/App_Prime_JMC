@@ -39,7 +39,7 @@ test('scoped board listing never reads rubric data after ownership transfers', a
       CREATE TABLE clients (id INTEGER PRIMARY KEY, prime_id INTEGER);
       CREATE TABLE prime_user_links (user_id INTEGER, prime_id INTEGER);
       CREATE TABLE tableaux_suivi (id INTEGER PRIMARY KEY, client_id INTEGER, created_at TEXT, archived_at TEXT);
-      CREATE TABLE tableau_rubriques (tableau_id INTEGER, key TEXT, statut TEXT, date TEXT, note TEXT, prochaine_action TEXT, version TEXT, prochaine_action_echeance TEXT);
+      CREATE TABLE tableau_rubriques (tableau_id INTEGER, key TEXT, statut TEXT, date TEXT, note TEXT, prochaine_action TEXT, version TEXT, prochaine_action_echeance TEXT, prochaine_action_debut TEXT);
       INSERT INTO clients VALUES (1, 10);
       INSERT INTO prime_user_links VALUES (100, 10);
       INSERT INTO tableaux_suivi VALUES (5, 1, 'initial', NULL);

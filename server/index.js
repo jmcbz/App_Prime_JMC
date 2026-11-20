@@ -242,9 +242,22 @@ function handleError(res, error, msg) {
   res.status(500).json({ error: msg });
 }
 
+app.get('/api/tool-activity',auth.requireAuth,async(req,res)=>{
+ try{res.json(await db.toolFeed(req.auth));}catch(e){handleError(res,e,'Activité indisponible');}
+});
+app.post('/api/tool-activity',auth.requireAuth,async(req,res)=>{
+ try{
+  if(req.body?.userId!==req.auth.sub)return res.status(409).json({error:'Session modifiée; rechargez le dossier'});
+  res.json(await db.recordToolOpen(req.auth,req.body?.module,req.body?.id));
+ }catch(e){if([400,404].includes(e.statusCode))return res.status(e.statusCode).json({error:e.message});handleError(res,e,'Activité non enregistrée');}
+});
+app.get('/api/control-tower', auth.requireAuth, async (req,res)=>{
+ try {res.json(await db.controlTower(req.auth));}catch(e){handleError(res,e,'Synthèse indisponible');}
+});
+
 // Primes
 app.get('/api/primes', auth.requireAuth, async (req, res) => {
-  try { res.json({ primes: req.auth.role === 'admin' ? await db.listPrimes() : await db.listPrimesForUser(req.auth.sub) }); }
+  try { res.json({ primes: await db.primeProfiles(req.auth) }); }
   catch (e) { handleError(res, e, 'Erreur chargement des Primes'); }
 });
 app.post('/api/primes', auth.requireAuth, auth.requireAdmin, async (req, res) => {
@@ -484,6 +497,7 @@ async function start() {
   await db.initDb();
   await seedFirstAdmin();
   await db.seedMetier();
+  await db.initializeLoadClock();
   app.listen(PORT, () => console.log(`🚀 PRIsME Prime API — port ${PORT}`));
 }
 

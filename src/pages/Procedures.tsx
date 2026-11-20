@@ -1,3 +1,4 @@
+import ToolActivityPanel from '../components/ToolActivityPanel';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -41,6 +42,7 @@ export default function Procedures() {
         <p className="mt-1 text-sm text-slate-400">Checklist terrain, compte rendu, historique et exports.</p>
         <Link to="/procedures/prise-en-charge" className="mt-3 inline-flex rounded-lg bg-bz-blue px-4 py-2 text-sm font-semibold text-white">Ouvrir l’outil →</Link>
       </Card>
+      <ToolActivityPanel/>
       {user?.role === 'admin' && <>
       <div className="mb-5 flex flex-wrap gap-2">
         {CATEGORIES.map((c) => (

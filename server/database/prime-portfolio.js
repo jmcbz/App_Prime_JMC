@@ -1,3 +1,4 @@
+import { beginLoadPg, beginLoadSqlite, reconcilePg, reconcileSqlite } from './monthly-load.js';
 // Atomic App Prime portfolio update. No writes are sent to Servo.
 import { createInitialTableauSqlite, createTableauForClient } from './tableaux-suivi.js';
 import { pgListTransferLock } from './client-onboardings.js';
@@ -46,6 +47,7 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
   if (driver.kind === 'sqlite') {
     return driver.sqlite.transaction(() => {
       const sqlite = driver.sqlite;
+      const loadAt=beginLoadSqlite(sqlite);
       const existingPrime = sqlite.prepare('SELECT * FROM primes WHERE id = ?').get(id);
       if (!existingPrime) return null;
       const rows = sqlite.prepare('SELECT * FROM clients ORDER BY id').all();
@@ -68,6 +70,7 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
           .run(...Object.values(fields));
         createInitialTableauSqlite(driver, created.lastInsertRowid);
       }
+      reconcileSqlite(sqlite,loadAt);
       return { prime: normalizePrime(sqlite.prepare('SELECT * FROM primes WHERE id = ?').get(id)),
         clients: sqlite.prepare('SELECT * FROM clients WHERE prime_id = ? ORDER BY id').all(id).map(normalizeClient) };
     }).immediate();
@@ -75,7 +78,7 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
 
   const connection = await driver.pool.connect();
   try {
-    await connection.query('BEGIN');
+    await connection.query('BEGIN'); const loadAt=await beginLoadPg(connection);
     // Lists hold the shared gate before paging across client locks. Acquire its
     // exclusive side before the portfolio advisory and Prime/client row locks.
     await pgListTransferLock(sql => connection.query(sql), true);
@@ -102,6 +105,7 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
       await createTableauForClient(driver, created.rows[0].id, connection);
     }
     const clients = (await connection.query('SELECT * FROM clients WHERE prime_id = $1 ORDER BY id', [id])).rows.map(normalizeClient);
+    await reconcilePg(connection,loadAt);
     await connection.query('COMMIT');
     return { prime: normalizePrime(updated), clients };
   } catch (error) {

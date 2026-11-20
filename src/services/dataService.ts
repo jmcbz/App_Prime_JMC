@@ -9,7 +9,10 @@ export interface Prime {
   nom: string;
   codeTitan: string;
   specialites: string[];
-  disponibilite: Disponibilite;
+  disponibilite: Disponibilite; // manual value: never overwrite it with automatic load
+  effectiveAvailability?: Disponibilite;
+  autoCharge?: boolean;
+  monthlyCount?: number;
   avatarInitiales: string;
   clientsIds: number[]; // dérivé côté client à partir des clients
 }

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useBlocker } from 'react-router-dom';
+import DossierDeepLink from '../components/DossierDeepLink';
+import {recordToolOpen} from '../services/controlTowerService';
 import { Page, PageHeader } from '../layout/Page';
 import { Card } from '../components/ui';
 import { archiveClientOnboarding, createClientOnboarding, createTemplateItems, getClientOnboarding, getClientOnboardingHistory, getCompleteOnboardingHistory, getOnboardingOptions, listClientOnboardings, onboardingPriorities, onboardingStatuses, reconcileClientOnboarding, restoreClientOnboarding, updateClientOnboarding, type ClientOnboarding as Onboarding, type ClientOnboardingItem as Item, type ClientOnboardingHistory, type OnboardingOptions, type OnboardingReconciliation } from '../services/clientOnboardingService';
@@ -166,14 +168,17 @@ function ClientOnboardingForUser({userId}: {userId: number}) {
       if (!reconciled || !reconciliation?.found || reconciliation.id !== id ||
           !window.confirm('Ouvrir ce dossier trouvé? Le brouillon de création non confirmée sera perdu uniquement si le dossier se charge correctement.')) return;
     } else if (!confirmDiscard()) return;
+    const signal=exportIdentity.current?.signal;
+    if(!signal || signal.aborted)return;
     const requestId = ++detailRequest.current;
     detailPendingRef.current = true;
     historyRequest.current++;
     setHistory([]); setNextBefore(null); setHistoryLoading(false); setHistoryError('');
     setDetailLoading(true); setError('');
-    try { const row = await getClientOnboarding(id); if(requestId !== detailRequest.current) return;
+    try { const row = await getClientOnboarding(id); if(requestId !== detailRequest.current || signal.aborted) return;
       if (uncertainCreate) { removePending(pendingCreate); setPendingCreate(null); invalidateReconciliation(); }
-      setSelected(row); setPersistedStatus(row.statut); setItems(row.items ?? []); setSection(row.items?.[0]?.section_key || 'informations-generales'); setDirty(false); setHistory(row.history || []); void loadHistory(id, undefined, requestId); }
+      setSelected(row); setPersistedStatus(row.statut); setItems(row.items ?? []); setSection(row.items?.[0]?.section_key || 'informations-generales'); setDirty(false); setHistory(row.history || []); void loadHistory(id, undefined, requestId);
+      void recordToolOpen('onboarding',id,userId,signal).catch(e=>{if(!signal.aborted && requestId===detailRequest.current)setError(`Dossier ouvert; activité non enregistrée : ${message(e)}`);}); }
     catch(e) { if(requestId === detailRequest.current) setError(message(e)); } finally { if(requestId === detailRequest.current) { detailPendingRef.current = false; setDetailLoading(false); } }
   }
   function edit<K extends keyof Onboarding>(key: K, value: Onboarding[K]) {
@@ -314,7 +319,7 @@ function ClientOnboardingForUser({userId}: {userId: number}) {
     } catch(e) { if (!signal.aborted) setError(`Export annulé : ${message(e)}`); }
     finally { if (activeExport.current === signal) { activeExport.current = null; busyRef.current = false; setExporting(false); } }
   };
-  return <Page>
+  return <Page><DossierDeepLink ready={!loading && !busy && !uncertainCreate && auth.verified && !auth.loading} onOpen={id=>{void open(id);}} onError={setError}/>
     <PageHeader titre="Prise en charge client TI" sousTitre="Checklist terrain · suivi, preuves, actions et historique" action={<Link to="/procedures" className="text-sm text-titan-cyan">← Trousse d’outils</Link>} />
     {storageError && <div role="alert" className="mb-4 rounded-xl border border-red-400/40 bg-red-500/10 p-3 text-sm text-red-300">{storageError}</div>}
     {error && <div role="alert" className="mb-4 rounded-xl border border-red-400/40 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}

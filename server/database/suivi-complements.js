@@ -1,3 +1,4 @@
+import { beginLoadPg, beginLoadSqlite, loadLock, reconcilePg, reconcileSqlite } from './monthly-load.js';
 import { pgListTransferLock } from './client-onboardings.js';
 
 const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
@@ -43,7 +44,7 @@ export async function history(driver,id,actor,before=null) {
   if (pg) {
     const tx=await driver.pool.connect();
     try {
-      await tx.query('BEGIN');
+      await tx.query('BEGIN'); await loadLock(tx);
       await pgListTransferLock(query=>tx.query(query));
       const initial=(await tx.query('SELECT client_id,prime_id FROM suivis WHERE id=$1',[id])).rows[0];
       if (!initial) throw fail(404,'Suivi introuvable');
@@ -92,17 +93,19 @@ export async function append(driver,id,actor,input,normalize) {
   if (!validId(id)) throw fail(400,'Identifiant invalide');
   validate(input);
   if (driver.kind==='sqlite') return driver.sqlite.transaction(()=>{
+    const loadAt=beginLoadSqlite(driver.sqlite);
     const sqlite=driver.sqlite, row=sqlite.prepare(accessSql(false,actor)).get(...parameters(id,actor));
     if (!row) throw fail(404,'Suivi introuvable');
     const last=sqlite.prepare('SELECT id,statut,echeance FROM suivi_complements WHERE suivi_id=? ORDER BY id DESC LIMIT 1').get(id);
     check(row,last,input);
     const inserted=sqlite.prepare('INSERT INTO suivi_complements (suivi_id,author_id,statut,echeance,note) VALUES (?,?,?,?,?) RETURNING *')
       .get(id,actor.sub,input.statut,input.echeance,input.note);
+    reconcileSqlite(sqlite,loadAt);
     return result(row,inserted,normalize);
   }).immediate();
   const tx=await driver.pool.connect();
   try {
-    await tx.query('BEGIN');
+    await tx.query('BEGIN'); const loadAt=await beginLoadPg(tx);
     // Portfolio takes the exclusive gate before locking clients. Use its shared side first.
     await pgListTransferLock(sql=>tx.query(sql));
     const initial=(await tx.query(`${base} WHERE s.id=$1`,[id])).rows[0];
@@ -121,6 +124,7 @@ export async function append(driver,id,actor,input,normalize) {
     check(row,last,input);
     const inserted=(await tx.query('INSERT INTO suivi_complements (suivi_id,author_id,statut,echeance,note) VALUES ($1,$2,$3,$4,$5) RETURNING *',
       [id,actor.sub,input.statut,input.echeance,input.note])).rows[0];
+    await reconcilePg(tx,loadAt);
     await tx.query('COMMIT');
     return result(row,inserted,normalize);
   } catch(error) {await tx.query('ROLLBACK');throw error;}

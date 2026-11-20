@@ -1,3 +1,5 @@
+import { activitySchema } from './tool-activity.js';
+import { loadSchema } from './monthly-load.js';
 // Compatibility migration for App Prime's pre-JSON métier tables. Never
 // interpret an unrelated table with the same name as an App Prime table.
 const TABLES = {
@@ -12,6 +14,8 @@ const CORE = {
 };
 const LEGACY_REQUIRED = { primes: 'nom', clients: 'nom', suivis: 'titre' };
 const BOARD_COLUMNS = {
+  tool_open_activity: ['id','user_id','module','dossier_id','opened_at'],
+  prime_monthly_load_state: ['prime_id','period_key','auto_charge','evaluated_at'],
   workstation_templates: ['id','client_id','name','sections','version'],
   workstation_dossiers: ['id','client_id','template_id','employee','computer','ticket','date','sections','version','archived_at'],
   client_onboardings: ['id','client_id','technicien_id','titre','statut','priorite','urgence_ti','site_principal','contact_principal','periode_couverte','prepare_pour','avancement_global','risques_critiques','actions_ouvertes','decisions_requises','prochaine_rencontre','version','data','archived','archived_at','compte_rendu','created_by_id','created_by_email','updated_by_id','updated_by_email','created_at','updated_at'],
@@ -30,6 +34,8 @@ const USER_COLUMNS = {
   prime_user_links: ['user_id', 'prime_id'],
 };
 const PG_TYPES = {
+  tool_open_activity: {id:'int4',user_id:'int4',module:'text',dossier_id:'int4',opened_at:'text'},
+  prime_monthly_load_state: {prime_id:'int4',period_key:'text',auto_charge:'int4',evaluated_at:'text'},
   workstation_templates: { id:'int4',client_id:'int4',seed_key:'text',name:'text',sections:'jsonb',version:'int4' },
   workstation_dossiers: { id:'int4',client_id:'int4',template_id:'int4',employee:'text',computer:'text',ticket:'text',date:'text',sections:'jsonb',version:'int4',archived_at:'timestamp' },
   users: { id: 'int4', email: 'text', password_hash: 'text', is_active: 'bool', created_at: 'timestamp' },
@@ -42,10 +48,12 @@ const PG_TYPES = {
   client_onboarding_items: { id:'int4',onboarding_id:'int4',item_order:'int4',checked:'bool',echeance:'date',created_at:'timestamp',updated_at:'timestamp',...Object.fromEntries(ITEM_TEXT.map(k=>[k,'text'])) },
   client_onboarding_history: { id:'int4',onboarding_id:'int4',snapshot:'jsonb',actor_id:'int4',actor_email:'text',event_type:'text',created_at:'timestamp' },
   tableaux_suivi: { id: 'int4', client_id: 'int4', created_at: 'timestamp', archived_at: 'timestamp' },
-  tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', prochaine_action_echeance: 'text', version: 'text' },
+  tableau_rubriques: { tableau_id: 'int4', key: 'text', statut: 'text', date: 'text', note: 'text', prochaine_action: 'text', prochaine_action_echeance: 'text', prochaine_action_debut: 'text', version: 'text' },
   suivi_complements: { id:'int4', suivi_id:'int4', author_id:'int4', statut:'text', echeance:'text', note:'text', created_at:'timestamp' },
 };
 const PG_FOREIGN_KEYS = [
+  ['tool_open_activity','user_id','users','id','CASCADE'],
+  ['prime_monthly_load_state','prime_id','primes','id','CASCADE'],
   ['workstation_templates','client_id','clients','id','RESTRICT'],
   ['workstation_dossiers','client_id','clients','id','RESTRICT'],
   ['workstation_dossiers','template_id','workstation_templates','id','RESTRICT'],
@@ -68,6 +76,8 @@ const PG_FOREIGN_KEYS = [
   ['tableau_rubriques', 'tableau_id', 'tableaux_suivi', 'id', 'CASCADE'],
 ];
 const SQLITE_TYPES = {
+  tool_open_activity: {id:'INTEGER',user_id:'INTEGER',module:'TEXT',dossier_id:'INTEGER',opened_at:'TEXT'},
+  prime_monthly_load_state: {prime_id:'INTEGER',period_key:'TEXT',auto_charge:'INTEGER',evaluated_at:'TEXT'},
   workstation_templates: {id:'INTEGER',client_id:'INTEGER',seed_key:'TEXT',name:'TEXT',sections:'TEXT',version:'INTEGER'},
   workstation_dossiers: {id:'INTEGER',client_id:'INTEGER',template_id:'INTEGER',employee:'TEXT',computer:'TEXT',ticket:'TEXT',date:'TEXT',sections:'TEXT',version:'INTEGER',archived_at:'TEXT'},
   users: { id: 'INTEGER', email: 'TEXT', password_hash: 'TEXT', is_active: 'INTEGER' },
@@ -80,7 +90,7 @@ const SQLITE_TYPES = {
   client_onboarding_items: { id:'INTEGER',onboarding_id:'INTEGER',item_order:'INTEGER',checked:'INTEGER',echeance:'TEXT',created_at:'TEXT',updated_at:'TEXT',...Object.fromEntries(ITEM_TEXT.map(k=>[k,'TEXT'])) },
   client_onboarding_history: { id:'INTEGER',onboarding_id:'INTEGER',snapshot:'TEXT',actor_id:'INTEGER',actor_email:'TEXT',event_type:'TEXT',created_at:'TEXT' },
   tableaux_suivi: { id: 'INTEGER', client_id: 'INTEGER', created_at: 'TEXT', archived_at: 'TEXT' },
-  tableau_rubriques: { tableau_id: 'INTEGER', key: 'TEXT', statut: 'TEXT', date: 'TEXT', note: 'TEXT', prochaine_action: 'TEXT', prochaine_action_echeance: 'TEXT', version: 'TEXT' },
+  tableau_rubriques: { tableau_id: 'INTEGER', key: 'TEXT', statut: 'TEXT', date: 'TEXT', note: 'TEXT', prochaine_action: 'TEXT', prochaine_action_echeance: 'TEXT', prochaine_action_debut: 'TEXT', version: 'TEXT' },
   suivi_complements: { id:'INTEGER', suivi_id:'INTEGER', author_id:'INTEGER', statut:'TEXT', echeance:'TEXT', note:'TEXT', created_at:'TEXT' },
 };
 
@@ -198,7 +208,7 @@ export async function checkPgMetierIdentity(pool) {
         }
         continue;
       }
-      const key = table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
+      const key = table === 'prime_monthly_load_state' ? 'prime_id' : table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
       if (!keys.rows.some(row => row.table_name === table && row.constraint_type === 'PRIMARY KEY' && row.column_name === key)) {
         throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${key} absente`);
       }
@@ -276,6 +286,7 @@ export async function migratePgMetier(pool, createSchema) {
     await checkPgMetierIdentity(connection);
     await createSchema(connection);
     await connection.query('ALTER TABLE tableau_rubriques ADD COLUMN IF NOT EXISTS prochaine_action_echeance TEXT');
+    await connection.query('ALTER TABLE tableau_rubriques ADD COLUMN IF NOT EXISTS prochaine_action_debut TEXT');
     await (await import('./client-onboardings.js')).createOnboardingSchemaPg(connection);
     await (await import('./workstation-procedures.js')).migratePg(connection);
     const found = await pgColumns(connection);
@@ -312,6 +323,8 @@ export async function migratePgMetier(pool, createSchema) {
       await connection.query(`UPDATE ${table} SET updated_at = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL`);
       await connection.query(`ALTER TABLE ${table} ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP, ALTER COLUMN updated_at SET NOT NULL`);
     }
+    await connection.query(loadSchema(true));
+    await connection.query(activitySchema(true));
     await connection.query('COMMIT');
     return legacy;
   } catch (error) {
@@ -328,6 +341,9 @@ function sqliteColumns(sqlite, table) {
 
 // Called inside initDb's schema transaction, after full identity validation.
 export function migrateSqliteRubriqueEcheance(sqlite) {
+  sqlite.exec(loadSchema(false));
+  sqlite.exec(activitySchema(false));
+  if (!sqliteColumns(sqlite, 'tableau_rubriques').has('prochaine_action_debut')) sqlite.exec('ALTER TABLE tableau_rubriques ADD COLUMN prochaine_action_debut TEXT');
   if (!sqliteColumns(sqlite, 'tableau_rubriques').has('prochaine_action_echeance')) {
     sqlite.exec('ALTER TABLE tableau_rubriques ADD COLUMN prochaine_action_echeance TEXT');
   }
@@ -384,7 +400,7 @@ export function checkSqliteMetierIdentity(sqlite) {
         throw new Error('Schéma étranger à App Prime: clé primaire tableau_rubriques(tableau_id,key) incompatible');
       }
     } else {
-      const primaryKey = table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
+      const primaryKey = table === 'prime_monthly_load_state' ? 'prime_id' : table === 'user_mfa' || table === 'prime_user_links' ? 'user_id' : 'id';
       if (rows.filter(row => row.pk).length !== 1 || columns.get(primaryKey)?.pk !== 1) {
         throw new Error(`Schéma étranger à App Prime: clé primaire ${table}.${primaryKey} incompatible`);
       }

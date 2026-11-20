@@ -1,3 +1,4 @@
+import {loadLock} from './monthly-load.js';
 import {createHash} from 'node:crypto';
 // Shared workstation templates and immutable-at-creation dossier checklists.
 import {withSqliteOwner} from './sqlite-isolation.js';
@@ -65,7 +66,7 @@ let queue=Promise.resolve();
 async function run(driver,fn,write=false){
  if(driver.kind==='pg'){
   if(!write)return fn(async(sql,params=[]) => (await driver.pool.query(sql.replace(/\?/g,(_,offset)=>`$${sql.slice(0,offset).split('?').length}`),params)).rows);
-  const conn=await driver.pool.connect();try{await conn.query('BEGIN');const result=await fn(async(sql,params=[])=> (await conn.query(sql.replace(/\?/g,(_,offset)=>`$${sql.slice(0,offset).split('?').length}`),params)).rows);await conn.query('COMMIT');return result;}catch(e){await conn.query('ROLLBACK');throw e;}finally{conn.release();}
+  const conn=await driver.pool.connect();try{await conn.query('BEGIN');await loadLock(conn);const result=await fn(async(sql,params=[])=> (await conn.query(sql.replace(/\?/g,(_,offset)=>`$${sql.slice(0,offset).split('?').length}`),params)).rows);await conn.query('COMMIT');return result;}catch(e){await conn.query('ROLLBACK');throw e;}finally{conn.release();}
  }
  const task=queue.then(()=>withSqliteOwner(async()=>{if(write)driver.sqlite.exec('BEGIN IMMEDIATE');try{const result=await fn(async(sql,params=[])=>{const stmt=driver.sqlite.prepare(sql);return stmt.reader?stmt.all(...params):[stmt.run(...params)];});if(write)driver.sqlite.exec('COMMIT');return result;}catch(e){if(write)driver.sqlite.exec('ROLLBACK');throw e;}}));queue=task.catch(()=>{});return task;
 }

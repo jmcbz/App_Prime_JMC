@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import DossierDeepLink from '../components/DossierDeepLink';
+import {recordToolOpen} from '../services/controlTowerService';
 import { Page, PageHeader } from '../layout/Page';
 import { Card } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
@@ -259,10 +261,12 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     });
   };
   const openDossier = (id: number) => {
-    if (locked.current) return;
+    const signal=exportIdentity.current?.signal;
+    if (locked.current || pending || !signal || signal.aborted || !userId) return;
     const token = ++historyRequest.current;
     setError('');
-    void run(async () => { const item = await getDossier(id); if (item.id !== id) throw Error('Dossier reçu différent'); if (token !== historyRequest.current || deletedHistory.current.has(id)) return; setDraft(copy(item)); });
+    void run(async () => { const item = await getDossier(id); if (item.id !== id) throw Error('Dossier reçu différent'); if (token !== historyRequest.current || deletedHistory.current.has(id) || signal.aborted) return; setDraft(copy(item));
+      void recordToolOpen('workstation',id,userId,signal).catch(e=>{if(!signal.aborted && token===historyRequest.current)setError(`Dossier ouvert; activité non enregistrée : ${message(e)}`);}); });
   };
   const removeHistory = (item: WorkstationDossier) => {
     const signal = historyIdentity.current?.signal;
@@ -387,7 +391,7 @@ function WorkstationEditor({ userId, isAdmin }: { userId: number | null; isAdmin
     });
   };
   if(accessDenied || !auth.verified || auth.loading || auth.user?.id!==userId)return <Page><p role="alert">Accès refusé ou session à vérifier. Rechargez après vérification de vos droits.</p></Page>;
-  return <Page>
+  return <Page><DossierDeepLink ready={auth.verified && !auth.loading && !busy && !pending && templates.length>0} onOpen={openDossier} onError={setError}/>
     <style data-workstation-print>{`@media print {
       .min-h-screen { min-height: 0 !important; }
       #primary-navigation, header { display: none !important; }
