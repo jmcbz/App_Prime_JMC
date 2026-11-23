@@ -1,4 +1,5 @@
 import { activitySchema } from './tool-activity.js';
+import { skillsSchema, seedSkills, adapter, importSpecialties } from './skills.js';
 import { loadSchema } from './monthly-load.js';
 // Compatibility migration for App Prime's pre-JSON métier tables. Never
 // interpret an unrelated table with the same name as an App Prime table.
@@ -14,6 +15,9 @@ const CORE = {
 };
 const LEGACY_REQUIRED = { primes: 'nom', clients: 'nom', suivis: 'titre' };
 const BOARD_COLUMNS = {
+  prime_competence_aliases: ['id','competence_id'],
+  prime_competences: ['id','name','archived','version'],
+  prime_evaluations: ['id','prime_id','competence_id','level','version','updated_at','updated_by'],
   tool_open_activity: ['id','user_id','module','dossier_id','opened_at'],
   prime_monthly_load_state: ['prime_id','period_key','auto_charge','evaluated_at'],
   workstation_templates: ['id','client_id','name','sections','version'],
@@ -34,6 +38,9 @@ const USER_COLUMNS = {
   prime_user_links: ['user_id', 'prime_id'],
 };
 const PG_TYPES = {
+  prime_competence_aliases: {id:'text',competence_id:'text'},
+  prime_competences: {id:'text',name:'text',archived:'int4',version:'int4'},
+  prime_evaluations: {id:'text',prime_id:'int4',competence_id:'text',level:'int4',version:'int4',updated_at:'text',updated_by:'int4'},
   tool_open_activity: {id:'int4',user_id:'int4',module:'text',dossier_id:'int4',opened_at:'text'},
   prime_monthly_load_state: {prime_id:'int4',period_key:'text',auto_charge:'int4',evaluated_at:'text'},
   workstation_templates: { id:'int4',client_id:'int4',seed_key:'text',name:'text',sections:'jsonb',version:'int4' },
@@ -52,6 +59,10 @@ const PG_TYPES = {
   suivi_complements: { id:'int4', suivi_id:'int4', author_id:'int4', statut:'text', echeance:'text', note:'text', created_at:'timestamp' },
 };
 const PG_FOREIGN_KEYS = [
+  ['prime_competence_aliases','competence_id','prime_competences','id','RESTRICT'],
+  ['prime_evaluations','prime_id','primes','id','RESTRICT'],
+  ['prime_evaluations','competence_id','prime_competences','id','RESTRICT'],
+  ['prime_evaluations','updated_by','users','id','RESTRICT'],
   ['tool_open_activity','user_id','users','id','CASCADE'],
   ['prime_monthly_load_state','prime_id','primes','id','CASCADE'],
   ['workstation_templates','client_id','clients','id','RESTRICT'],
@@ -76,6 +87,9 @@ const PG_FOREIGN_KEYS = [
   ['tableau_rubriques', 'tableau_id', 'tableaux_suivi', 'id', 'CASCADE'],
 ];
 const SQLITE_TYPES = {
+  prime_competence_aliases: {id:'TEXT',competence_id:'TEXT'},
+  prime_competences: {id:'TEXT',name:'TEXT',archived:'INTEGER',version:'INTEGER'},
+  prime_evaluations: {id:'TEXT',prime_id:'INTEGER',competence_id:'TEXT',level:'INTEGER',version:'INTEGER',updated_at:'TEXT',updated_by:'INTEGER'},
   tool_open_activity: {id:'INTEGER',user_id:'INTEGER',module:'TEXT',dossier_id:'INTEGER',opened_at:'TEXT'},
   prime_monthly_load_state: {prime_id:'INTEGER',period_key:'TEXT',auto_charge:'INTEGER',evaluated_at:'TEXT'},
   workstation_templates: {id:'INTEGER',client_id:'INTEGER',seed_key:'TEXT',name:'TEXT',sections:'TEXT',version:'INTEGER'},
@@ -95,6 +109,8 @@ const SQLITE_TYPES = {
 };
 
 function checkOnboardingSet(names) {
+  const skills=['prime_competences','prime_evaluations','prime_competence_aliases'].filter(t=>names.has(t));
+  if(skills.length&&skills.length!==3) throw new Error('Schéma App Prime incomplet: compétences');
   const found=['client_onboardings','client_onboarding_items','client_onboarding_history'].filter(t=>names.has(t));
   if(found.length && found.length!==3) throw new Error('Schéma App Prime incomplet: tables prise en charge');
 }
@@ -285,6 +301,8 @@ export async function migratePgMetier(pool, createSchema) {
     await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-metier-json-v1'))");
     await checkPgMetierIdentity(connection);
     await createSchema(connection);
+    await connection.query(skillsSchema(true));
+    await seedSkills(adapter({kind:'pg'},connection));
     await connection.query('ALTER TABLE tableau_rubriques ADD COLUMN IF NOT EXISTS prochaine_action_echeance TEXT');
     await connection.query('ALTER TABLE tableau_rubriques ADD COLUMN IF NOT EXISTS prochaine_action_debut TEXT');
     await (await import('./client-onboardings.js')).createOnboardingSchemaPg(connection);
@@ -325,6 +343,7 @@ export async function migratePgMetier(pool, createSchema) {
     }
     await connection.query(loadSchema(true));
     await connection.query(activitySchema(true));
+    await importSpecialties(adapter({kind:'pg'},connection));
     await connection.query('COMMIT');
     return legacy;
   } catch (error) {

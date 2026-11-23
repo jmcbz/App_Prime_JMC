@@ -11,6 +11,7 @@ import QRCode from 'qrcode';
 
 import * as db from './database/index.js';
 import * as workstation from './database/workstation-procedures.js';
+import * as skills from './database/skills.js';
 import * as auth from './auth.js';
 import * as mfa from './mfa-service.js';
 import { loadActiveServoClients } from './servo-clients.js';
@@ -256,6 +257,16 @@ app.get('/api/control-tower', auth.requireAuth, async (req,res)=>{
 });
 
 // Primes
+function skillsRoute(fn){return async(req,res)=>{
+ try{res.json(await fn(req));}catch(e){if([400,401,403,404,409,413].includes(e.statusCode))return res.status(e.statusCode).json({error:e.message});handleError(res,e,'Compétences indisponibles');}
+};}
+app.put('/api/skills/competences/:id',auth.requireAuth,auth.requireAdmin,skillsRoute(async req=>skills.saveCompetence(await db.initDb(),req.auth,req.params.id,req.body)));
+app.put('/api/skills/evaluations/:primeId/:id',auth.requireAuth,auth.requireAdmin,skillsRoute(async req=>{
+ if(!/^[1-9]\d*$/.test(req.params.primeId))throw Object.assign(new Error('Prime invalide'),{statusCode:400});
+ return skills.saveEvaluation(await db.initDb(),req.auth,Number(req.params.primeId),req.params.id,req.body);
+}));
+app.delete('/api/skills/competences/:id',auth.requireAuth,auth.requireAdmin,(_req,res)=>res.status(405).json({error:'Archivez la compétence pour conserver ses évaluations.'}));
+app.get('/api/skills',auth.requireAuth,skillsRoute(req=>db.skillsMatrix(req.auth)));
 app.get('/api/primes', auth.requireAuth, async (req, res) => {
   try { res.json({ primes: await db.primeProfiles(req.auth) }); }
   catch (e) { handleError(res, e, 'Erreur chargement des Primes'); }
@@ -265,7 +276,7 @@ app.post('/api/primes', auth.requireAuth, auth.requireAdmin, async (req, res) =>
     const { nom } = req.body || {};
     if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
     res.status(201).json({ prime: await db.createPrime(req.body) });
-  } catch (e) { handleError(res, e, 'Erreur création Prime'); }
+  } catch (e) { if([400,409].includes(e.statusCode))return res.status(e.statusCode).json({error:e.message});handleError(res, e, 'Erreur création Prime'); }
 });
 app.put('/api/primes/:id', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try {
@@ -273,7 +284,7 @@ app.put('/api/primes/:id', auth.requireAuth, auth.requireAdmin, async (req, res)
     const prime = await db.updatePrime(id, req.body || {});
     if (!prime) return res.status(404).json({ error: 'Prime introuvable' });
     res.json({ prime });
-  } catch (e) { handleError(res, e, 'Erreur mise à jour Prime'); }
+  } catch (e) { if([400,409].includes(e.statusCode))return res.status(e.statusCode).json({error:e.message});handleError(res, e, 'Erreur mise à jour Prime'); }
 });
 app.put('/api/primes/:id/portfolio', auth.requireAuth, auth.requireAdmin, async (req, res) => {
   try {

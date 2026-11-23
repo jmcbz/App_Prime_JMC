@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { fetchServoClients, type Prime } from '../services/dataService';
 import { createPrime, updatePrimePortfolio, deletePrime, type PrimeInput } from '../services/metierAdminService';
 import { filterServoClients, type ServoClient } from '../lib/servoPrimeClients';
+import SkillsMatrixPanel from '../components/SkillsMatrixPanel';
 
 const CHAMPS: ChampDef[] = [
   { nom: 'nom', label: 'Nom', type: 'text', requis: true },
@@ -26,6 +27,7 @@ export default function Primes() {
   const { primes, clients: allClients, loading, error, reload } = useMetier();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const [polyvalence, setPolyvalence] = useState(false);
 
   const [form, setForm] = useState<Record<string, unknown> | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
@@ -85,6 +87,12 @@ export default function Primes() {
           </button>
         )}
       />
+      <div className="mb-5 flex flex-wrap gap-2">
+        <button className="rounded-xl border border-white/20 px-4 py-2 text-sm text-white" aria-pressed={!polyvalence} onClick={()=>{if(!polyvalence||window.dispatchEvent(new Event('prime-skills:before-leave',{cancelable:true})))setPolyvalence(false);}}>Profils et clients</button>
+        <button className="rounded-xl border border-white/20 px-4 py-2 text-sm text-white" aria-pressed={polyvalence} onClick={()=>setPolyvalence(true)}>Maîtrise de polyvalence</button>
+      </div>
+      <div hidden={!polyvalence}>{polyvalence&&<SkillsMatrixPanel key={`${user?.id}:${user?.role}`}/>}</div>
+      <div hidden={polyvalence}>
       {loading && (
         <div className="flex items-center gap-2 px-1 py-8 text-sm text-slate-400">
           <Loader2 className="h-4 w-4 animate-spin" /> Chargement…
@@ -224,6 +232,7 @@ export default function Primes() {
           onClose={() => setSuppr(null)}
         />
       )}
+      </div>
     </Page>
   );
 }

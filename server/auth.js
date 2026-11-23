@@ -4,15 +4,12 @@
  */
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import crypto from 'node:crypto';
+import {getJwtSecret,mfaVersion,currentSessionActor} from './session-policy.js';
 import { getUserById, getMfaByUserId } from './database/index.js';
 
 const SESSION_EXPIRES = '12h';
 const COOKIE_NAME = 'app_prime_session';
 
-function getJwtSecret() {
-  return process.env.JWT_SECRET || 'app-prime-dev-secret-change-in-production';
-}
 
 export async function hashPassword(plain) {
   return bcrypt.hash(String(plain), 10);
@@ -36,10 +33,6 @@ export function publicUser(user) {
   };
 }
 
-function mfaVersion(mfa) {
-  if (!mfa?.mfa_enabled || !mfa.secret_encrypted) return null;
-  return crypto.createHmac('sha256', getJwtSecret()).update(mfa.secret_encrypted).digest('hex');
-}
 
 export function issueSessionToken(user, mfa) {
   const version = mfaVersion(mfa);
@@ -91,11 +84,11 @@ export async function requireAuth(req, res, next) {
     console.error('Vérification de session impossible:', error);
     return res.status(503).json({ error: 'Vérification de session indisponible' });
   }
-  const currentVersion = mfaVersion(mfa);
-  if (!user || !user.is_active || !currentVersion || decoded.mfaVersion !== currentVersion) {
+  const current = currentSessionActor(decoded,user,mfa);
+  if (!current) {
     return res.status(401).json({ error: 'Session invalide' });
   }
-  req.auth = { ...decoded, sub: user.id, email: user.email, role: user.role };
+  req.auth = current;
   next();
 }
 

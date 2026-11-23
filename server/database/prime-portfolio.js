@@ -1,4 +1,5 @@
 import { beginLoadPg, beginLoadSqlite, reconcilePg, reconcileSqlite } from './monthly-load.js';
+import {ensureSpecialties,ensureSpecialtiesSqlite,adapter} from './skills.js';
 // Atomic App Prime portfolio update. No writes are sent to Servo.
 import { createInitialTableauSqlite, createTableauForClient } from './tableaux-suivi.js';
 import { pgListTransferLock } from './client-onboardings.js';
@@ -50,11 +51,13 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
       const loadAt=beginLoadSqlite(sqlite);
       const existingPrime = sqlite.prepare('SELECT * FROM primes WHERE id = ?').get(id);
       if (!existingPrime) return null;
+      if(!Object.hasOwn(prime,'specialites'))data.specialites=parseData(existingPrime.data).specialites??[];
       const rows = sqlite.prepare('SELECT * FROM clients ORDER BY id').all();
       const actions = plan(rows, id, changes, normalizeClient, parseData);
       const fields = sqlFields('primes', data, legacyValues);
       sqlite.prepare(`UPDATE primes SET ${Object.keys(fields).map((k) => `${k} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
         .run(...Object.values(fields), id);
+      ensureSpecialtiesSqlite(sqlite,data.specialites);
       for (const clientId of actions.remove) {
         const result = sqlite.prepare("UPDATE clients SET prime_id = NULL, updated_at = datetime('now') WHERE id = ? AND prime_id = ?").run(clientId, id);
         if (result.changes !== 1) throw conflict('Association modifiée pendant la sauvegarde');
@@ -85,11 +88,13 @@ export async function applyPrimePortfolio(driver, helpers, id, prime, changes) {
     await connection.query("SELECT pg_advisory_xact_lock(hashtext('app-prime-servo-portfolio-v1'))");
     const existingPrime = (await connection.query('SELECT * FROM primes WHERE id = $1 FOR UPDATE', [id])).rows[0];
     if (!existingPrime) { await connection.query('ROLLBACK'); return null; }
+    if(!Object.hasOwn(prime,'specialites'))data.specialites=parseData(existingPrime.data).specialites??[];
     const rows = (await connection.query('SELECT * FROM clients ORDER BY id FOR UPDATE')).rows;
     const actions = plan(rows, id, changes, normalizeClient, parseData);
     const fields = sqlFields('primes', data, legacyValues);
     const columns = Object.keys(fields), values = Object.values(fields);
     const updated = (await connection.query(`UPDATE primes SET ${columns.map((k, i) => `${k} = $${i + 1}${k === 'data' || k === 'specialites' ? '::jsonb' : ''}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${columns.length + 1} RETURNING *`, [...values, id])).rows[0];
+    await ensureSpecialties(adapter(driver,connection),data.specialites);
     for (const clientId of actions.remove) {
       const result = await connection.query('UPDATE clients SET prime_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND prime_id = $2 RETURNING id', [clientId, id]);
       if (result.rowCount !== 1) throw conflict('Association modifiée pendant la sauvegarde');

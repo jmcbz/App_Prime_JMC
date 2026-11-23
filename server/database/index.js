@@ -4,6 +4,7 @@
  * SQLite (better-sqlite3) en développement local. Interface asynchrone unique.
  */
 import * as toolActivity from './tool-activity.js';
+import * as skills from './skills.js';
 import { beginLoadPg, beginLoadSqlite, loadLock, reconcilePg, reconcileSqlite, readTower, startLoadClock } from './monthly-load.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -71,8 +72,11 @@ export async function initDb() {
       const legacyColumns = sqlite.transaction(() => {
         checkSqliteMetierIdentity(sqlite);
         createSchemaSqlite(sqlite);
+        sqlite.exec(skills.skillsSchema(false));
+        for(const [i,name] of skills.INITIAL_SKILLS.entries()) sqlite.prepare('INSERT INTO prime_competences(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING').run(`ti-${i+1}`,name);
         migrateSqliteRubriqueEcheance(sqlite);
         const legacyColumns = migrateSqliteMetier(sqlite);
+        skills.importSpecialtiesSqlite(sqlite);
         sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_servo_id ON clients(json_extract(data, '$.servoClientId')) WHERE json_extract(data, '$.servoClientId') IS NOT NULL");
         createOnboardingSchemaSqlite(sqlite);
         workstation.migrateSqlite(sqlite);
@@ -583,6 +587,7 @@ async function insertJsonRow(table, data, fks = {}, connection = null) {
     const r = await (connection || driver.pool).query(
       `INSERT INTO ${table} (${cols.join(',')}) VALUES (${ph.join(',')}) RETURNING *`, values,
     );
+    if(table==='primes')await skills.ensureSpecialties(skills.adapter(driver,connection),data.specialites);
     return r.rows[0];
   }
   return driver.sqlite.transaction(() => {
@@ -591,6 +596,7 @@ async function insertJsonRow(table, data, fks = {}, connection = null) {
   const info = driver.sqlite.prepare(
     `INSERT INTO ${table} (${sqliteCols.join(',')}) VALUES (${cols.map(() => '?').join(',')},datetime('now'))`
   ).run(...values);
+  if(table==='primes')skills.ensureSpecialtiesSqlite(driver.sqlite,data.specialites);
   reconcileSqlite(driver.sqlite,loadAt);
   return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid);
   }).immediate();
@@ -601,23 +607,27 @@ async function updateJsonRow(table, id, data, fks = {}, connection=null) {
   if(driver.kind==='pg' && !connection) return loadMutationPg(tx=>updateJsonRow(table,id,data,fks,tx));
   const json = JSON.stringify(data || {});
   const fields = { data: json, ...fks, ...legacyValues(table, data) };
+  const keepSpecialties=table==='primes'&&!Object.hasOwn(data,'specialites');
+  if(keepSpecialties)delete fields.specialites;
   const cols = Object.keys(fields);
   const values = Object.values(fields);
   if (driver.kind === 'pg') {
     const sets = [...cols.map((c, i) =>
-      `${c} = $${i + 1}${c === 'data' || c === 'specialites' ? '::jsonb' : ''}`),
+      c==='data'&&keepSpecialties?`data = jsonb_set($${i+1}::jsonb,'{specialites}',COALESCE(data->'specialites','[]'::jsonb))`:`${c} = $${i + 1}${c === 'data' || c === 'specialites' ? '::jsonb' : ''}`),
       'updated_at = CURRENT_TIMESTAMP'];
     const r = await connection.query(
       `UPDATE ${table} SET ${sets.join(', ')} WHERE id = $${cols.length + 1} RETURNING *`,
       [...values, id]
     );
+    if(table==='primes'&&!keepSpecialties&&r.rows.length)await skills.ensureSpecialties(skills.adapter(driver,connection),data.specialites);
     return r.rows[0] || null;
   }
   return driver.sqlite.transaction(() => {
   const loadAt=beginLoadSqlite(driver.sqlite);
-  const sets = [...cols.map(c => `${c} = ?`), "updated_at = datetime('now')"];
+  const sets = [...cols.map(c => c==='data'&&keepSpecialties?"data = json_set(?, '$.specialites', json_extract(data,'$.specialites'))":`${c} = ?`), "updated_at = datetime('now')"];
   driver.sqlite.prepare(`UPDATE ${table} SET ${sets.join(', ')} WHERE id = ?`)
     .run(...values, id);
+  if(table==='primes'&&!keepSpecialties&&driver.sqlite.prepare('SELECT 1 FROM primes WHERE id=?').get(id))skills.ensureSpecialtiesSqlite(driver.sqlite,data.specialites);
   reconcileSqlite(driver.sqlite,loadAt);
   return driver.sqlite.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) || null;
   }).immediate();
@@ -654,6 +664,7 @@ function normalizePrime(row) {
 }
 
 function primeData({ nom, codeTitan, specialites, disponibilite, avatarInitiales }) {
+  if(specialites!==undefined&&!Array.isArray(specialites))throw Object.assign(new Error('Spécialités invalides'),{statusCode:400});
   return {
     nom: nom || '',
     codeTitan: codeTitan || '',
@@ -677,7 +688,9 @@ export async function createPrime(input, connection = null) {
 }
 
 export async function updatePrime(id, input) {
-  return normalizePrime(await updateJsonRow('primes', id, primeData(input)));
+  const data=primeData(input);
+  if(!Object.hasOwn(input,'specialites'))delete data.specialites;
+  return normalizePrime(await updateJsonRow('primes', id, data));
 }
 
 export async function updatePrimePortfolio(id, prime, changes) {
@@ -786,6 +799,9 @@ export async function createClient(input, connection = null) {
 }
 
 export async function toolFeed(actor) { return toolActivity.feed(driver,actor); }
+export async function skillsMatrix(actor) {
+ return skills.matrix(driver,actor);
+}
 export async function recordToolOpen(actor,module,id) { return toolActivity.recordOpen(driver,actor,module,id); }
 export async function primeProfiles(actor) {
  const tower=await readTower(driver,actor);
