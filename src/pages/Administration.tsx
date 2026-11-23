@@ -145,7 +145,7 @@ export default function Administration() {
                           <option value="">— Prime existant à associer —</option>
                           {primes.filter((p) => !users.some((owner) => owner.primeId === p.id)).map((p) => {
                             const names = clients.filter((c) => c.primeId === p.id).slice(0, 2).map((c) => c.nom);
-                            return <option key={p.id} value={p.id}>{p.nom}{p.codeTitan ? ` · ${p.codeTitan}` : ''}{names.length ? ` · ${names.join(', ')}` : ' · sans client'}</option>;
+                            return <option key={p.id} value={p.id}>{p.nom}{names.length ? ` · ${names.join(', ')}` : ' · sans client'}</option>;
                           })}
                         </select>
                         <button type="button" disabled={!association[u.id] || associating === u.id}

@@ -40,6 +40,8 @@ test('Prime form hides Code Titan without losing its value and prevents Enter in
     const { createRoot } = await import('react-dom/client');
     root = createRoot(document.getElementById('root'));
     await act(async () => root.render(React.createElement(AuthProvider, null, React.createElement(Primes))));
+    assert.doesNotMatch(document.body.textContent, /code titan/i, 'Prime cards and heading must not expose Code Titan');
+    assert.ok(!document.body.textContent.includes(prime.codeTitan), 'Prime cards must not expose the historical code value');
     await act(async () => document.querySelector('button[title="Modifier"]').click());
     assert.ok(!document.querySelector('form input[placeholder="Ex. Nightwing"]'), 'Code Titan must not be editable');
     assert.ok(![...document.querySelectorAll('form label')].some(label => label.textContent === 'Code Titan'));

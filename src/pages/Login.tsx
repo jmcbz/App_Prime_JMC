@@ -53,9 +53,9 @@ export default function Login() {
   return (
     <div className="flex min-h-screen items-center justify-center titan-grid px-4">
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-bz-dark2/90 p-8 shadow-titan backdrop-blur">
-        <div className="mb-6 flex items-center gap-3">
-          <LogoTitan size={44} />
-          <div>
+        <div className="mb-6 flex flex-col items-center gap-3">
+          <LogoTitan size={192} />
+          <div className="text-center">
             <div className="text-lg font-extrabold text-white">PRIsME Prime</div>
             <div className="text-xs font-medium text-titan-cyan">Tour des Titans BZ</div>
           </div>

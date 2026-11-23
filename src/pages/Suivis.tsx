@@ -314,7 +314,7 @@ export default function Suivis() {
       Filtrer par Prime
       <select aria-label="Filtrer par Prime" value={filtrePrime} onChange={e => { if(!drafts.canLeave())return; setFiltrePrime(e.target.value); setShowArchives(false); }} className="rounded-xl border border-white/10 bg-bz-dark2 px-3 py-2 text-white">
         <option value="tous">Tous les Primes</option>
-        {primes.map(p => <option key={p.id} value={String(p.id)}>{p.nom} · {p.codeTitan}</option>)}
+        {primes.map(p => <option key={p.id} value={String(p.id)}>{p.nom}</option>)}
         <option value="sans">Sans Prime</option>
       </select>
     </label>}

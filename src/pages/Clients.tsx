@@ -25,7 +25,7 @@ function champs(primes: Prime[]): ChampDef[] {
     ] },
     { nom: 'primeId', label: 'Prime responsable', type: 'select', options: [
       { value: '', label: '— Aucun —' },
-      ...primes.map((p) => ({ value: String(p.id), label: `${p.nom} · ${p.codeTitan}` })),
+      ...primes.map((p) => ({ value: String(p.id), label: p.nom })),
     ] },
     { nom: 'statut', label: 'Statut', type: 'select', options: [
       { value: 'actif', label: 'Actif' },
@@ -108,7 +108,7 @@ export default function Clients() {
                   <td className="px-5 py-3 text-slate-300">{c.secteur}</td>
                   {isAdmin && <td className="px-5 py-3 text-slate-300">{c.clientType === 'ti' ? 'TI' : c.clientType === 'telecom' ? 'Télécom' : 'Inconnu / non classé'}</td>}
                   <td className="px-5 py-3 text-slate-200">
-                    {prime ? <>{prime.nom} <span className="text-titan-cyan">· {prime.codeTitan}</span></> : <span className="text-slate-500">—</span>}
+                    {prime ? prime.nom : <span className="text-slate-500">—</span>}
                   </td>
                   <td className="px-5 py-3">
                     <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${st.cls}`}>

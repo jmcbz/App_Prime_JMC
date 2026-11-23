@@ -44,9 +44,9 @@ export default function Sidebar({ mobileOpen = false, onClose, onEscape, collaps
   return (
     <aside id="primary-navigation" aria-label="Navigation principale"
       className={`prime-sidebar fixed left-0 top-0 z-50 h-screen w-64 flex-col overflow-y-auto border-r border-white/10 bg-bz-dark md:z-40 md:flex ${mobileOpen ? 'flex' : 'hidden'} ${collapsed ? 'sidebar-collapsed' : ''}`}>
-      <div className="sidebar-brand relative flex items-center gap-3 border-b border-white/10 px-6 py-5 md:px-3 md:pr-11">
-        <LogoTitan size={40} />
-        <div className="sidebar-label">
+      <div className="sidebar-brand relative flex flex-col items-center gap-3 border-b border-white/10 px-6 py-5 md:px-3 md:pr-11">
+        <LogoTitan size={160} className="sidebar-logo" />
+        <div className="sidebar-label text-center">
           <div className="text-sm font-extrabold tracking-wide text-white">PRIsME Prime</div>
           <div className="text-[11px] font-medium text-titan-cyan">Tour des Titans BZ</div>
         </div>

@@ -17,6 +17,7 @@ body {
 @media (min-width: 768px) {
   .sidebar-collapsed { width: 5rem; }
   .sidebar-collapsed .sidebar-label { display: none; }
+  .sidebar-collapsed .sidebar-logo { width: 56px; height: 56px; }
   .sidebar-collapsed .sidebar-brand { padding: 1rem 0 3.5rem; justify-content: center; }
   .sidebar-collapsed .sidebar-toggle { top: auto; bottom: 0.5rem; right: 1.375rem; }
   .sidebar-collapsed nav a { justify-content: center; padding-left: 0; padding-right: 0; }
