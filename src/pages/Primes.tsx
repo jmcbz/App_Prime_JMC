@@ -11,7 +11,6 @@ import { filterServoClients, type ServoClient } from '../lib/servoPrimeClients';
 
 const CHAMPS: ChampDef[] = [
   { nom: 'nom', label: 'Nom', type: 'text', requis: true },
-  { nom: 'codeTitan', label: 'Code Titan', type: 'text', placeholder: 'Ex. Nightwing' },
   { nom: 'avatarInitiales', label: 'Initiales (avatar)', type: 'text', placeholder: 'Ex. JM' },
   { nom: 'specialites', label: 'Spécialités', type: 'tags', aide: 'Séparées par des virgules' },
   { nom: 'disponibilite', label: 'Disponibilité', type: 'select', options: [
@@ -38,6 +37,7 @@ export default function Primes() {
   const [removedClientIds, setRemovedClientIds] = useState<number[]>([]);
   const [addedServoIds, setAddedServoIds] = useState<number[]>([]);
   const requestId = useRef(0);
+  const searchInput = useRef<HTMLInputElement>(null);
 
   const fermer = () => { requestId.current += 1; setForm(null); setEditId(null); };
   const ouvrirAjout = () => { requestId.current += 1; setEditId(null); setForm({ ...VIDE }); };
@@ -180,31 +180,39 @@ export default function Primes() {
                 {!selectedLocalClients.length && !selectedServoClients.length && <span className="text-xs text-slate-500">Aucun client sélectionné</span>}
               </div>
               <label htmlFor="servo-client-search" className="mb-1 mt-3 block text-xs font-medium text-slate-400">Rechercher un client actif dans Servo</label>
-              <input id="servo-client-search" type="search" value={recherche}
+              <input ref={searchInput} id="servo-client-search" type="search" value={recherche}
+                aria-controls="servo-client-results" aria-describedby="servo-client-status servo-client-help"
+                onKeyDown={(e) => {
+                  // Enter searches here; it must not save/close the enclosing Prime form.
+                  if (e.key === 'Enter') e.preventDefault();
+                }}
                 onChange={(e) => setRecherche(e.target.value)} placeholder="Nom ou alias du client"
                 className="mb-2 w-full rounded-xl border border-white/10 bg-bz-dark px-3 py-2 text-sm text-white outline-none focus:border-bz-blue" />
-              <label htmlFor="servo-client-select" className="mb-1 block text-xs font-medium text-slate-400">Ajouter un client</label>
-              <select id="servo-client-select" aria-label="Ajouter un client Servo" value=""
-                disabled={servoLoading || !!servoError}
-                onChange={(e) => {
-                  const id = Number(e.target.value);
-                  if (!id) return;
-                  const removed = allClients.find((client) => client.primeId === editId && client.servoClientId === id);
-                  if (removed) setRemovedClientIds((ids) => ids.filter((clientId) => clientId !== removed.id));
-                  else setAddedServoIds((ids) => ids.includes(id) ? ids : [...ids, id]);
-                }}
-                className="w-full rounded-xl border border-white/10 bg-bz-dark px-3 py-2 text-sm text-white outline-none focus:border-bz-blue disabled:opacity-50">
-                <option value="">{servoLoading ? 'Chargement des clients…' : '— Sélectionner un client —'}</option>
-                {options.map((client) => {
+              <p id="servo-client-status" role="status" className="mb-1 text-xs text-slate-400">
+                {servoLoading ? 'Chargement des clients…' : servoError ? 'Recherche indisponible.' : options.length ? `${options.length} client(s) — cliquez pour ajouter.` : 'Aucun client correspondant à ajouter.'}
+              </p>
+              <ul id="servo-client-results" aria-label="Résultats clients Servo" aria-busy={servoLoading}
+                className="max-h-60 overflow-y-auto rounded-xl border border-white/10 bg-bz-dark">
+                {!servoLoading && !servoError && options.map((client) => {
                   const owner = allClients.find((local) => local.servoClientId === client.id)?.primeId;
-                  const otherPrime = owner && owner !== editId ? primes.find((p) => p.id === owner) : null;
-                  return <option key={client.id} value={client.id} disabled={!!otherPrime}>
-                    {client.nom}{client.alias ? ` (${client.alias})` : ''}{otherPrime ? ` — déjà attribué à ${otherPrime.nom}` : ''}
-                  </option>;
+                  const assignedElsewhere = owner != null && owner !== editId;
+                  const otherPrime = assignedElsewhere ? primes.find((p) => p.id === owner) : null;
+                  return <li key={client.id}>
+                    <button type="button" disabled={assignedElsewhere}
+                      onClick={() => {
+                        const removed = allClients.find((local) => local.primeId === editId && local.servoClientId === client.id);
+                        if (removed) setRemovedClientIds((ids) => ids.filter((id) => id !== removed.id));
+                        else setAddedServoIds((ids) => ids.includes(client.id) ? ids : [...ids, client.id]);
+                        searchInput.current?.focus();
+                      }}
+                      className="min-h-11 w-full break-words px-3 py-2 text-left text-sm text-white hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-bz-blue disabled:cursor-not-allowed disabled:text-slate-500">
+                      {client.nom}{client.alias ? ` (${client.alias})` : ''}{assignedElsewhere ? ` — déjà attribué à ${otherPrime?.nom ?? 'un autre Prime'}` : ''}
+                    </button>
+                  </li>;
                 })}
-              </select>
+              </ul>
               {servoError && <p role="alert" className="mt-1 text-xs text-red-400">{servoError} — les clients déjà associés restent disponibles.</p>}
-              {!servoLoading && !servoError && <p className="mt-1 text-[11px] text-slate-500">{options.length} client(s) dans la liste. La sélection ajoute un client; seul « Retirer » enlève une association existante.</p>}
+              <p id="servo-client-help" className="mt-1 text-[11px] text-slate-500">Tab pour parcourir les résultats, Entrée ou Espace pour ajouter. Faites défiler la liste pour voir tous les résultats. Seul « Retirer » enlève une association; « Enregistrer » sauvegarde les changements.</p>
             </div>
           )}
         </EntityFormModal>
