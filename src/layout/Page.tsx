@@ -13,5 +13,5 @@ export function PageHeader({ titre, sousTitre, action }: { titre: string; sousTi
 }
 
 export function Page({ children }: { children: ReactNode }) {
-  return <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>;
+  return <div className="w-full min-w-0 px-4 py-8 sm:px-6 lg:px-8">{children}</div>;
 }
